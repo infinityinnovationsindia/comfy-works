@@ -102,6 +102,11 @@ export default function ApplyLeavePage() {
     if (!dateFrom) { setSubmitErr('Please select a date.'); return }
     if (!reason.trim()) { setSubmitErr('Please enter a reason.'); return }
     if (!isSingleDay && (!dateTo || dateTo < dateFrom)) { setSubmitErr('Invalid date range.'); return }
+
+    // Block if selected dates are all holidays/non-working
+    if (sandwich && (sandwich.blocked || sandwich.working_days === 0)) {
+      setSubmitErr(sandwich.block_reason || 'Selected dates are holidays. Cannot apply leave.'); return
+    }
     if (['PL','HPL'].includes(leaveType) && balance && balance.pl_balance <= 0) {
       setSubmitErr('Insufficient PL balance. Please select Unpaid Leave instead.'); return
     }
@@ -266,14 +271,27 @@ export default function ApplyLeavePage() {
             <RefreshCw className="h-3.5 w-3.5 animate-spin" /> Checking holidays in range...
           </div>
         )}
-        {sandwich && !swLoading && (
+        {sandwich && !swLoading && (sandwich.blocked || sandwich.working_days === 0) && (
+          <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm">
+            <div className="flex items-start gap-2">
+              <AlertCircle className="h-4 w-4 text-red-500 flex-shrink-0 mt-0.5" />
+              <div>
+                <p className="text-red-800 font-medium">Cannot apply leave</p>
+                <p className="text-red-600 text-xs mt-0.5">
+                  {sandwich.block_reason || 'Selected dates are holidays or non-working days. No leave can be applied.'}
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+        {sandwich && !swLoading && !sandwich.blocked && sandwich.working_days > 0 && (
           <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 text-sm">
             <div className="flex items-start gap-2">
               <Info className="h-4 w-4 text-blue-500 flex-shrink-0 mt-0.5" />
               <div>
                 <p className="text-blue-800 font-medium">
                   {sandwich.working_days} day{sandwich.working_days !== 1 ? 's' : ''}
-                  {['PL','HPL'].includes(leaveType) && ` · ${sandwich.pl_to_deduct} PL will be deducted`}
+                  {['PL','HPL'].includes(leaveType) && sandwich.pl_to_deduct > 0 && ` · ${sandwich.pl_to_deduct} PL will be deducted`}
                 </p>
                 {sandwich.holidays_in_range?.length > 0 && (
                   <p className="text-blue-600 text-xs mt-0.5">
@@ -289,7 +307,6 @@ export default function ApplyLeavePage() {
             </div>
           </div>
         )}
-
         {/* Insufficient PL warning */}
         {['PL','HPL'].includes(leaveType) && balance && balance.pl_balance <= 0 && (
           <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700">
@@ -341,8 +358,9 @@ export default function ApplyLeavePage() {
           </div>
         )}
 
-        <button onClick={handleSubmit} disabled={submitting || balLoading}
-          className="w-full py-3 bg-[#1D9E75] text-white rounded-xl text-sm font-medium hover:bg-[#178a63] disabled:opacity-50 transition-colors flex items-center justify-center gap-2">
+        <button onClick={handleSubmit}
+          disabled={submitting || balLoading || (sandwich !== null && sandwich.working_days === 0)}
+          className="w-full py-3 bg-[#1D9E75] text-white rounded-xl text-sm font-medium hover:bg-[#178a63] disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2">
           {submitting ? <><RefreshCw className="h-4 w-4 animate-spin" /> Submitting...</> : 'Submit Leave Request'}
         </button>
         <p className="text-xs text-gray-400 text-center">

@@ -13,7 +13,6 @@ function createSupabase() {
   )
 }
 
-// GET /api/leave/sandwich?from=YYYY-MM-DD&to=YYYY-MM-DD&type=PL&employee_id=xxx
 export async function GET(request: Request) {
   try {
     const supabase = createSupabase()
@@ -59,7 +58,11 @@ export async function GET(request: Request) {
       cur.setDate(cur.getDate() + 1)
     }
 
-    // ── Fetch holidays in range ────────────────────────────────────────
+    // ── Fetch ONLY the holiday calendar — no auto-Sunday assumption ─────
+    // A date is non-working ONLY if it appears in the holiday calendar.
+    // Some Sundays ARE working days at Comfy Factory (if not listed).
+    // Some Sundays ARE holidays (if listed in calendar).
+    // This respects the actual calendar exactly.
     const { data: holidayRows } = await supabase
       .from('holidays')
       .select('date, name, type')
@@ -71,76 +74,67 @@ export async function GET(request: Request) {
       holidayMap.set(h.date, { name: h.name, type: h.type })
     }
 
-    // ── Non-working day check ──────────────────────────────────────────
-    // Comfy Furniture: Mon-Sat working, Sunday weekly off
+    // ── Non-working = in holiday calendar ONLY ─────────────────────────
     function isNonWorkingDay(dateStr: string): boolean {
-      const d = new Date(dateStr)
-      if (d.getDay() === 0) return true       // Sunday = weekly off
-      if (holidayMap.has(dateStr)) return true // declared holiday
-      return false
+      return holidayMap.has(dateStr)
     }
 
-    // ── THE CORRECT SANDWICH ALGORITHM ────────────────────────────────
+    // ── Correct sandwich algorithm ─────────────────────────────────────
     //
-    // Rule: A non-working day is counted as leave ONLY IF there is a
-    // working-day leave on BOTH sides of it within the selected range.
+    // 1. Find first and last WORKING day in selected range
+    // 2. Count all days between them (inclusive) — sandwiched holidays included
+    // 3. Non-working days BEFORE first working day → trimmed, not counted
+    // 4. Non-working days AFTER last working day  → trimmed, not counted
     //
-    // Exception: If leave is taken only BEFORE or only AFTER a weekly
-    // off/holiday, that off/holiday is NOT counted as leave.
-    //
-    // Implementation:
-    // 1. Find the first and last WORKING DAY in the selected range
-    // 2. Count all days between those two working days (inclusive)
-    //    → Non-working days in between = truly sandwiched → count
-    // 3. Non-working days BEFORE the first working day → do NOT count
-    // 4. Non-working days AFTER the last working day  → do NOT count
+    // Exception rule: "If leave is taken only before OR only after a
+    // weekly off/holiday, that off/holiday is NOT counted as leave."
+    // This is automatically handled by trimming leading/trailing non-working days.
 
     const workingDaysInRange = allDates.filter(d => !isNonWorkingDay(d))
 
     if (workingDaysInRange.length === 0) {
-      // Edge case: selected range has no working days (e.g. only selected Sundays)
+      // All selected dates are holidays/non-working — cannot apply leave
+      const holidayNames = allDates
+        .filter(d => holidayMap.has(d))
+        .map(d => holidayMap.get(d)!.name)
+        .filter((v, i, a) => a.indexOf(v) === i) // unique names
+
       return NextResponse.json({
-        working_days:        0,
-        pl_to_deduct:        0,
-        holidays_in_range:   [],
-        notice_violation:    false,
-        is_retroactive:      false,
-        calendar_type:       calendarType,
-        warning:             'No working days in selected range. Leave cannot be applied for non-working days only.',
+        working_days:      0,
+        pl_to_deduct:      0,
+        holidays_in_range: [],
+        notice_violation:  false,
+        is_retroactive:    false,
+        calendar_type:     calendarType,
+        blocked:           true,
+        block_reason:      holidayNames.length > 0
+          ? `Selected date(s) are holidays (${holidayNames.join(', ')}). Leave cannot be applied on holidays.`
+          : 'No working days in selected range.',
       })
     }
 
     const firstWorkingDay = workingDaysInRange[0]
     const lastWorkingDay  = workingDaysInRange[workingDaysInRange.length - 1]
 
-    // Count only days from first to last working day
-    const firstIdx = allDates.indexOf(firstWorkingDay)
-    const lastIdx  = allDates.indexOf(lastWorkingDay)
+    const firstIdx    = allDates.indexOf(firstWorkingDay)
+    const lastIdx     = allDates.indexOf(lastWorkingDay)
     const countedDates = allDates.slice(firstIdx, lastIdx + 1)
 
     const totalDaysConsumed = countedDates.length
 
-    // Non-working days that are sandwiched (between first and last working day)
+    // Sandwiched = non-working days between first and last working day
+    // These are truly sandwiched — there's working leave on both sides
     const sandwichedDays = countedDates
       .filter(d => isNonWorkingDay(d))
-      .map(d => {
-        const holiday = holidayMap.get(d)
-        const dayOfWeek = new Date(d).getDay()
-        return {
-          date: d,
-          name: holiday?.name ?? (dayOfWeek === 0 ? 'Sunday' : 'Holiday'),
-          type: holiday?.type ?? 'Weekly Off',
-        }
-      })
+      .map(d => ({
+        date: d,
+        name: holidayMap.get(d)!.name,
+        type: holidayMap.get(d)!.type,
+      }))
 
-    // Days trimmed from start (leading non-working days — not counted)
-    const trimmedStart = allDates.slice(0, firstIdx)
-    const trimmedEnd   = allDates.slice(lastIdx + 1)
-
-    // ── PL to deduct = total days consumed (sandwich included) ─────────
     const plToDeduct = ['PL', 'HPL'].includes(leaveType) ? totalDaysConsumed : 0
 
-    // ── Notice period check ────────────────────────────────────────────
+    // Notice period check
     const today = new Date()
     today.setHours(0, 0, 0, 0)
     const daysUntilLeave = Math.ceil(
@@ -154,17 +148,12 @@ export async function GET(request: Request) {
     if (isRetroactive) noticeViolation = true
 
     return NextResponse.json({
-      // Total leave days that will be consumed (correctly sandwiched)
       working_days:        totalDaysConsumed,
-      // Actual working days (excluding sandwiched non-working days)
       actual_working_days: workingDaysInRange.length,
-      // PL balance to deduct (0 for UL/HUL)
       pl_to_deduct:        plToDeduct,
-      // Non-working days that ARE sandwiched (show in UI)
       holidays_in_range:   sandwichedDays,
-      // Days trimmed from start/end (not counted — useful for debug)
-      trimmed_start:       trimmedStart.length,
-      trimmed_end:         trimmedEnd.length,
+      blocked:             false,
+      block_reason:        null,
       notice_violation:    noticeViolation,
       is_retroactive:      isRetroactive,
       calendar_type:       calendarType,
