@@ -3,7 +3,7 @@
 import { useState, useRef } from 'react';
 import * as XLSX from 'xlsx';
 import Link from 'next/link';
-import { bulkImportEmployees, type BulkRow, type BulkResult } from './bulk-actions';
+import { bulkImportEmployees, type BulkRow, type BulkResult } from './actions';
 
 type Step = 'idle' | 'preview' | 'importing' | 'done';
 
