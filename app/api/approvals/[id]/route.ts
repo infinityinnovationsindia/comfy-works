@@ -53,12 +53,22 @@ export async function PATCH(
 
     if (action === 'approve') {
       if (role === 'super_admin') {
-        await supabase.from('leave_requests').update({
+        // Kush is final authority regardless of current status.
+        // If request was still 'Pending' (he's also the L1), stamp both L1+L2.
+        // If already 'L1_Approved', stamp L2. Either way → 'Approved'.
+        const updateData: any = {
           status: 'Approved',
           l2_approver_id: empId,
           l2_approved_at: now,
           l2_comment: comment || null,
-        }).eq('id', id)
+        }
+        if (req.status === 'Pending') {
+          // Kush was L1 for this employee — fill L1 fields too
+          updateData.l1_approver_id = empId
+          updateData.l1_approved_at = now
+          updateData.l1_comment = comment || null
+        }
+        await supabase.from('leave_requests').update(updateData).eq('id', id)
 
         // Deduct PL balance
         if (['PL','HPL'].includes(req.leave_type) && req.pl_to_deduct) {

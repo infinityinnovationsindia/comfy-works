@@ -50,8 +50,12 @@ export async function GET(request: Request) {
     .order('created_at', { ascending: false })
 
   if (role === 'super_admin') {
-    leaveQ = leaveQ.eq('status', 'L1_Approved')
+    // Super admin (Kush) sees:
+    // 1. ALL L1_Approved — waiting for his final sign-off
+    // 2. Pending where HE is L1 approver — his direct reports (e.g. Sudhaben)
+    leaveQ = leaveQ.or(`status.eq.L1_Approved,and(status.eq.Pending,l1_approver_id.eq.${empId})`)
   } else {
+    // Other L1 approvers see Pending assigned to them
     leaveQ = leaveQ.eq('status', 'Pending').eq('l1_approver_id', empId)
   }
 
