@@ -214,7 +214,7 @@ export default function LeavePage() {
                     {leave.date_from !== leave.date_to && ` → ${fmt(leave.date_to)}`}
                     <span className="mx-1.5 text-gray-400">·</span>
                     <span className="font-medium">{leave.working_days_count} day{leave.working_days_count !== 1 ? 's' : ''}</span>
-                    {leave.pl_to_deduct && leave.pl_to_deduct > 0 && (
+                    {Number(leave.pl_to_deduct) > 0 && (
                       <span className="ml-1.5 text-blue-600 text-xs">({leave.pl_to_deduct} PL)</span>
                     )}
                   </p>
