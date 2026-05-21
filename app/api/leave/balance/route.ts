@@ -9,40 +9,31 @@ function createSupabase() {
   return createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        get: (n) => cookieStore.get(n)?.value,
-        set: () => {},
-        remove: () => {},
-      },
-    }
+    { cookies: { get: (n) => cookieStore.get(n)?.value, set: () => {}, remove: () => {} } }
   )
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
     const supabase = createSupabase()
+    const { searchParams } = new URL(request.url)
+    const reqEmployeeId = searchParams.get('employee_id') // admin can pass another employee's id
 
-    const { data: { user }, error: userErr } = await supabase.auth.getUser()
-    if (userErr || !user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    }
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
     const { data: account } = await supabase
-      .from('user_accounts')
-      .select('employee_id')
-      .eq('id', user.id)
-      .single()
+      .from('user_accounts').select('role, employee_id').eq('id', user.id).single()
 
-    if (!account?.employee_id) {
-      return NextResponse.json({ pl_earned: 0, pl_used: 0, pl_balance: 0, employment_type: 'Permanent' })
-    }
+    // Determine which employee's balance to return
+    const adminRoles = ['super_admin', 'hr_assistant', 'supervisor', 'production_head', 'design_head', 'project_head', 'accounts']
+    const isAdmin = adminRoles.includes(account?.role ?? '')
+    const empId = (reqEmployeeId && isAdmin) ? reqEmployeeId : account?.employee_id
+
+    if (!empId) return NextResponse.json({ pl_earned: 0, pl_used: 0, pl_balance: 0, employment_type: 'Permanent' })
 
     const { data: emp } = await supabase
-      .from('employees')
-      .select('employment_type, date_of_joining')
-      .eq('id', account.employee_id)
-      .single()
+      .from('employees').select('employment_type').eq('id', empId).single()
 
     const now = new Date()
     const fy = now.getMonth() >= 3
@@ -50,11 +41,8 @@ export async function GET() {
       : `${now.getFullYear() - 1}-${String(now.getFullYear()).slice(2)}`
 
     const { data: lb } = await supabase
-      .from('leave_balances')
-      .select('pl_earned, pl_used, pl_balance')
-      .eq('employee_id', account.employee_id)
-      .eq('financial_year', fy)
-      .single()
+      .from('leave_balances').select('pl_earned, pl_used, pl_balance')
+      .eq('employee_id', empId).eq('financial_year', fy).single()
 
     return NextResponse.json({
       pl_earned:       lb?.pl_earned  ?? 0,

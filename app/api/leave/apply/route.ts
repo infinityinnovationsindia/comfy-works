@@ -1,170 +1,158 @@
+export const dynamic = 'force-dynamic'
 
-import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
-import { calculateSandwich, hasNoticeViolation, isRetroactive } from '@/lib/leave-calculator';
-import { resolveApprovalChain } from '@/lib/approval-routing';
-import { generateToken } from '@/lib/approval-tokens';
-import { notifyLeaveApprover } from '@/lib/whatsapp';
+import { createServerClient } from '@supabase/ssr'
+import { cookies } from 'next/headers'
+import { NextResponse } from 'next/server'
 
-export async function POST(request: NextRequest) {
-  const body = await request.json();
-  const {
-    employeeId, leaveType, halfDayType,
-    dateFrom, dateTo, reason,
-    outOfStation, outOfStationContact, outOfStationAddress,
-    convertFromPL, // Edge case 1: convert PL→UL if balance=0
-  } = body;
-
-  const supabase = createClient(
+function createSupabase() {
+  const cookieStore = cookies()
+  return createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!,
-    { auth: { autoRefreshToken: false, persistSession: false } }
-  );
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    { cookies: { get: (n) => cookieStore.get(n)?.value, set: () => {}, remove: () => {} } }
+  )
+}
 
-  // Load employee
-  const { data: emp } = await supabase
-    .from('employees')
-    .select('id, first_name, last_name, employee_no, employment_type, location, phone')
-    .eq('id', employeeId)
-    .single();
-
-  if (!emp) return NextResponse.json({ error: 'Employee not found' }, { status: 404 });
-
-  // ── EDGE CASE 2: Probationer applying PL ────────────────────
-  if (leaveType === 'PL' && emp.employment_type === 'Probationer') {
-    return NextResponse.json({
-      error: 'PROBATIONER_PL_BLOCKED',
-      message: 'PL cannot be used during probation. Apply for Unpaid Leave (UL) instead.',
-      suggestion: 'UL',
-    }, { status: 422 });
-  }
-
-  // Load current PL balance
-  const now = new Date();
-  const fy = now.getMonth() >= 3
+function getFY() {
+  const now = new Date()
+  return now.getMonth() >= 3
     ? `${now.getFullYear()}-${String(now.getFullYear() + 1).slice(2)}`
-    : `${now.getFullYear() - 1}-${String(now.getFullYear()).slice(2)}`;
+    : `${now.getFullYear() - 1}-${String(now.getFullYear()).slice(2)}`
+}
 
-  const { data: balance } = await supabase
-    .from('leave_balances')
-    .select('*')
-    .eq('employee_id', employeeId)
-    .eq('financial_year', fy)
-    .single();
+function getDatesInRange(from: string, to: string): string[] {
+  const dates: string[] = []
+  const cur = new Date(from), end = new Date(to)
+  while (cur <= end) { dates.push(cur.toISOString().split('T')[0]); cur.setDate(cur.getDate() + 1) }
+  return dates
+}
 
-  const plBalance = balance?.pl_balance ?? 0;
+export async function POST(request: Request) {
+  try {
+    const supabase = createSupabase()
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  // Load holidays for sandwich calculation
-  const { data: holidays } = await supabase
-    .from('holidays')
-    .select('date, name, calendar_type')
-    .gte('date', dateFrom)
-    .lte('date', dateTo);
+    const { data: account } = await supabase
+      .from('user_accounts').select('role, employee_id').eq('id', user.id).single()
+    if (!account) return NextResponse.json({ error: 'No account' }, { status: 403 })
 
-  const sandwich = calculateSandwich(dateFrom, dateTo, holidays ?? [], emp.location);
-  const plToConsume = ['PL', 'HPL'].includes(leaveType)
-    ? (leaveType === 'HPL' ? 0.5 : sandwich.plToDeduct)
-    : 0;
+    const body = await request.json()
+    const {
+      leave_type, half_day_type, date_from, date_to, reason,
+      out_of_station, out_of_station_contact, out_of_station_address,
+      on_behalf_employee_id, // admin filling for another employee
+    } = body
 
-  // ── EDGE CASE 1: PL balance = 0, employee applies PL ────────
-  if (['PL', 'HPL'].includes(leaveType) && plBalance < plToConsume) {
-    if (!convertFromPL) {
-      return NextResponse.json({
-        error: 'INSUFFICIENT_PL',
-        message: `PL balance (${plBalance}) is insufficient for ${plToConsume} days. Convert to Unpaid Leave?`,
-        plBalance,
-        plRequired: plToConsume,
-        suggestion: leaveType === 'PL' ? 'UL' : 'HUL',
-        salaryDeductionWarning: `This will result in ${plToConsume} day(s) salary deduction.`,
-      }, { status: 422 });
+    // Determine the employee this leave is FOR
+    const adminRoles = ['super_admin', 'hr_assistant', 'supervisor', 'production_head', 'design_head', 'project_head']
+    const isAdmin = adminRoles.includes(account.role)
+    const targetEmpId = (on_behalf_employee_id && isAdmin) ? on_behalf_employee_id : account.employee_id
+    const filedOnBehalf = !!(on_behalf_employee_id && isAdmin && on_behalf_employee_id !== account.employee_id)
+
+    if (!targetEmpId) return NextResponse.json({ error: 'No employee linked to account' }, { status: 400 })
+    if (!leave_type || !date_from || !date_to || !reason) {
+      return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
     }
-    // Employee confirmed conversion to UL — proceed with converted type
-  }
 
-  const finalLeaveType = (convertFromPL && ['PL','HPL'].includes(leaveType))
-    ? (leaveType === 'PL' ? 'UL' : 'HUL')
-    : leaveType;
+    // Get employee info for approval routing
+    const { data: emp } = await supabase
+      .from('employees').select('employment_type, reporting_manager_id, location, department')
+      .eq('id', targetEmpId).single()
 
-  // ── EDGE CASE 4: Notice period violation ─────────────────────
-  const noticeViolation = hasNoticeViolation(finalLeaveType, dateFrom);
+    if (!emp) return NextResponse.json({ error: 'Employee not found' }, { status: 404 })
 
-  // ── EDGE CASE 8: Retroactive application ─────────────────────
-  const retroactive = isRetroactive(dateFrom);
+    // Probationer PL block
+    if (['PL','HPL'].includes(leave_type) && emp.employment_type !== 'Permanent') {
+      return NextResponse.json({ error: 'PL cannot be used during probation period. Please select Unpaid Leave (UL).' }, { status: 400 })
+    }
 
-  // Resolve approval chain
-  const chain = await resolveApprovalChain(employeeId);
-  if (!chain) return NextResponse.json({ error: 'Could not determine approval chain' }, { status: 500 });
+    // Calculate working days (simplified - sandwich rule applied on client side preview)
+    const allDates = getDatesInRange(date_from, date_to)
 
-  // Generate one-tap approval token
-  const approvalToken = generateToken();
+    // Get holidays in range to apply sandwich rule
+    const { data: holidays } = await supabase
+      .from('holidays')
+      .select('date')
+      .in('date', allDates)
+      .eq('calendar_type', ['Showroom'].includes(emp.location) ? 'Showroom' : 'Factory')
 
-  const approveUrl = `${process.env.NEXT_PUBLIC_APP_URL}/approve/${approvalToken}`;
+    const holidaySet = new Set((holidays || []).map(h => h.date))
+    // Per sandwich rule: ALL days in range count (including holidays/weekends between)
+    const workingDays = allDates.length
+    const plToDeduct = ['PL','HPL'].includes(leave_type) ? workingDays : 0
 
-  // Insert leave request
-  const { data: leave, error: insertErr } = await supabase
-    .from('leave_requests')
-    .insert({
-      employee_id:            employeeId,
-      leave_type:             finalLeaveType,
-      half_day_type:          halfDayType ?? null,
-      date_from:              dateFrom,
-      date_to:                dateTo,
-      working_days_count:     sandwich.workingDays,
-      pl_to_deduct:           plToConsume,
-      reason,
-      out_of_station:         outOfStation ?? false,
-      out_of_station_contact: outOfStationContact ?? null,
-      out_of_station_address: outOfStationAddress ?? null,
-      notice_violation:       noticeViolation,
-      is_retroactive:         retroactive,
-      status:                 'Pending',
-      l1_approver_id:         chain.l1ApproverId,
-      l2_approver_id:         chain.l2ApproverId,
-      l3_approver_id:         chain.chainType === '3step' ? chain.l3ApproverId : null,
-      chain_type:             chain.chainType,
-      approval_token:         approvalToken,
+    // PL balance check
+    if (['PL','HPL'].includes(leave_type)) {
+      const { data: lb } = await supabase
+        .from('leave_balances').select('pl_balance')
+        .eq('employee_id', targetEmpId).eq('financial_year', getFY()).single()
+      if ((lb?.pl_balance ?? 0) < plToDeduct) {
+        return NextResponse.json({
+          error: `Insufficient PL balance. Available: ${lb?.pl_balance ?? 0}, Required: ${plToDeduct}. Please select Unpaid Leave.`
+        }, { status: 400 })
+      }
+    }
+
+    // Notice period check
+    const today = new Date().toISOString().split('T')[0]
+    const daysBeforeLeave = Math.ceil((new Date(date_from).getTime() - new Date(today).getTime()) / 86400000)
+    const noticeViolation = (['PL','UL'].includes(leave_type) && daysBeforeLeave < 3) ||
+                            (['HPL','HUL'].includes(leave_type) && daysBeforeLeave < 1) ||
+                            (date_from < today) // retroactive
+
+    const isRetroactive = date_from < today
+
+    // Determine L1 approver from reporting_manager_id
+    let l1ApproverId = emp.reporting_manager_id
+
+    // Get L2 (Kush - super_admin) id
+    const { data: kushAccount } = await supabase
+      .from('user_accounts').select('employee_id').eq('role', 'super_admin').single()
+
+    const { data: leaveReq, error } = await supabase
+      .from('leave_requests')
+      .insert({
+        employee_id:              targetEmpId,
+        leave_type,
+        half_day_type:            half_day_type || null,
+        date_from,
+        date_to,
+        working_days_count:       workingDays,
+        pl_to_deduct:             plToDeduct,
+        reason,
+        out_of_station:           out_of_station ?? false,
+        out_of_station_contact:   out_of_station_contact || null,
+        out_of_station_address:   out_of_station_address || null,
+        notice_violation:         noticeViolation,
+        is_retroactive:           isRetroactive,
+        status:                   'Pending',
+        l1_approver_id:           l1ApproverId || kushAccount?.employee_id,
+        l2_approver_id:           kushAccount?.employee_id,
+        filed_by_employee_id:     filedOnBehalf ? account.employee_id : null,
+        filed_on_behalf:          filedOnBehalf,
+      })
+      .select('id')
+      .single()
+
+    if (error) {
+      console.error('Leave insert error:', error)
+      return NextResponse.json({ error: error.message }, { status: 500 })
+    }
+
+    // Audit log
+    await supabase.from('audit_log').insert({
+      table_name: 'leave_requests',
+      record_id:  leaveReq.id,
+      action:     'INSERT',
+      new_values: { employee_id: targetEmpId, leave_type, date_from, date_to, filed_on_behalf: filedOnBehalf },
+      changed_by: account.employee_id,
+      reason:     filedOnBehalf ? `Filed on behalf by ${account.role}` : 'Self application',
     })
-    .select()
-    .single();
 
-  if (insertErr || !leave) {
-    return NextResponse.json({ error: insertErr?.message }, { status: 500 });
+    return NextResponse.json({ success: true, id: leaveReq.id })
+  } catch (err: any) {
+    console.error('leave/apply error:', err)
+    return NextResponse.json({ error: err.message || 'Failed to submit' }, { status: 500 })
   }
-
-  // Load L1 approver phone
-  const { data: l1 } = await supabase
-    .from('employees')
-    .select('first_name, last_name, phone')
-    .eq('id', chain.l1ApproverId)
-    .single();
-
-  // Send WhatsApp to L1 approver
-  if (l1?.phone) {
-    await notifyLeaveApprover({
-      approverPhone: l1.phone.replace(/[^0-9]/g, ''),
-      employeeName: `${emp.first_name} ${emp.last_name}`,
-      leaveType: finalLeaveType,
-      dateFrom,
-      dateTo,
-      days: sandwich.totalCalendarDays,
-      reason,
-      plBalance: plBalance - plToConsume,
-      approveUrl,
-    });
-  }
-
-  return NextResponse.json({
-    success: true,
-    leaveId: leave.id,
-    leaveType: finalLeaveType,
-    plToConsume,
-    plBalance,
-    noticeViolation,
-    retroactive,
-    sandwich: {
-      totalDays: sandwich.totalCalendarDays,
-      sandwichedHolidays: sandwich.sandwichedHolidays,
-      breakdown: sandwich.breakdown,
-    },
-  });
 }

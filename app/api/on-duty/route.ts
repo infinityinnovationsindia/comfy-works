@@ -1,73 +1,91 @@
+export const dynamic = 'force-dynamic'
 
-import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
-import { sendWhatsApp } from '@/lib/whatsapp';
+import { createServerClient } from '@supabase/ssr'
+import { cookies } from 'next/headers'
+import { NextResponse } from 'next/server'
 
-function db() {
-  return createClient(
+function createSupabase() {
+  const cookieStore = cookies()
+  return createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!,
-    { auth: { autoRefreshToken: false, persistSession: false } }
-  );
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    { cookies: { get: (n) => cookieStore.get(n)?.value, set: () => {}, remove: () => {} } }
+  )
 }
 
-export async function GET(request: NextRequest) {
-  const { searchParams } = new URL(request.url);
-  const date = searchParams.get('date');
-  const supabase = db();
+export async function GET() {
+  try {
+    const supabase = createSupabase()
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  let q = supabase.from('on_duty_requests')
-    .select('*, employee:employee_id(first_name, last_name, employee_no)')
-    .order('created_at', { ascending: false });
+    const { data: account } = await supabase
+      .from('user_accounts').select('employee_id').eq('id', user.id).single()
+    if (!account?.employee_id) return NextResponse.json({ requests: [] })
 
-  if (date) q = q.eq('date', date);
-  const { data } = await q;
-  return NextResponse.json(data ?? []);
-}
+    const { data: requests, error } = await supabase
+      .from('on_duty_requests')
+      .select('id, date, time_out, time_in_planned, time_in_actual, purpose, location_to_visit, vehicle_type, vehicle_number, outward_km, inward_km, total_km, status, created_at')
+      .eq('employee_id', account.employee_id)
+      .order('created_at', { ascending: false })
+      .limit(30)
 
-export async function POST(request: NextRequest) {
-  const body = await request.json();
-  const supabase = db();
-
-  const { data: od, error } = await supabase
-    .from('on_duty_requests')
-    .insert({
-      employee_id: body.employeeId,
-      date: body.date,
-      time_out: body.timeOut,
-      time_in_planned: body.timeInPlanned,
-      purpose: body.purpose,
-      location_to_visit: body.locationToVisit,
-      vehicle_type: body.vehicleType,
-      vehicle_number: body.vehicleNumber,
-      outward_km: body.outwardKm,
-      project_site: body.projectSite,
-      status: 'Pending',
-    })
-    .select()
-    .single();
-
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-
-  // Notify Kush for approval
-  const { data: kush } = await supabase.from('employees').select('phone').eq('employee_no', 'CF-004').single();
-  const { data: emp } = await supabase.from('employees').select('first_name, last_name').eq('id', body.employeeId).single();
-
-  if (kush?.phone && emp) {
-    await sendWhatsApp(
-      kush.phone.replace(/[^0-9]/g, ''),
-      'comfy_on_duty_approved',
-      [
-        `${emp.first_name} ${emp.last_name}`,
-        'Official Duty',
-        body.date,
-        body.timeOut,
-        body.locationToVisit,
-        `${body.vehicleType ?? 'N/A'}: ${body.vehicleNumber ?? 'N/A'}`,
-        'Kush Patel',
-      ]
-    );
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+    return NextResponse.json({ requests: requests || [] })
+  } catch (err: any) {
+    return NextResponse.json({ error: err.message }, { status: 500 })
   }
+}
 
-  return NextResponse.json({ success: true, id: od.id });
+export async function POST(request: Request) {
+  try {
+    const supabase = createSupabase()
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+    const { data: account } = await supabase
+      .from('user_accounts').select('role, employee_id').eq('id', user.id).single()
+    if (!account) return NextResponse.json({ error: 'No account' }, { status: 403 })
+
+    const body = await request.json()
+    const {
+      date, time_out, time_in_planned, purpose, location_to_visit,
+      vehicle_type, vehicle_number, outward_km, on_behalf_employee_id,
+    } = body
+
+    if (!date || !purpose?.trim() || !location_to_visit?.trim()) {
+      return NextResponse.json({ error: 'Date, Purpose, and Location are required' }, { status: 400 })
+    }
+
+    const adminRoles = ['super_admin','hr_assistant','supervisor','production_head','design_head','project_head']
+    const isAdmin = adminRoles.includes(account.role)
+    const targetEmpId = (on_behalf_employee_id && isAdmin) ? on_behalf_employee_id : account.employee_id
+
+    // Get approver (Kush for OD per spec)
+    const { data: kushAccount } = await supabase
+      .from('user_accounts').select('employee_id').eq('role', 'super_admin').single()
+
+    const { data: req, error } = await supabase
+      .from('on_duty_requests')
+      .insert({
+        employee_id:       targetEmpId,
+        date,
+        time_out:          time_out          || null,
+        time_in_planned:   time_in_planned   || null,
+        purpose:           purpose.trim(),
+        location_to_visit: location_to_visit.trim(),
+        vehicle_type:      vehicle_type      || null,
+        vehicle_number:    vehicle_number    || null,
+        outward_km:        outward_km        || null,
+        status:            'Pending',
+        approved_by:       kushAccount?.employee_id || null,
+      })
+      .select('id')
+      .single()
+
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+    return NextResponse.json({ success: true, id: req.id })
+  } catch (err: any) {
+    return NextResponse.json({ error: err.message }, { status: 500 })
+  }
 }
