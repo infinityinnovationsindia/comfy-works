@@ -134,11 +134,17 @@ export default async function DashboardPage() {
             shift:shifts(start_time, end_time)
           )`)
         .eq('date', today),
-      supabase.from('leave_requests')
-        .select(`id, leave_type, date_from, date_to, created_at,
-          employee:employees!leave_requests_employee_id_fkey(first_name, last_name, employee_no, department)`)
-        .eq('status', role === 'super_admin' ? 'L1_Approved' : 'Pending')
-        .order('created_at', { ascending: false }).limit(6),
+      (role === 'super_admin'
+        ? supabase.from('leave_requests')
+            .select(`id, leave_type, date_from, date_to, created_at,
+              employee:employees!leave_requests_employee_id_fkey(first_name, last_name, employee_no, department)`)
+            .or(`status.eq.L1_Approved,and(status.eq.Pending,l1_approver_id.eq.${empId})`)
+            .order('created_at', { ascending: false }).limit(6)
+        : supabase.from('leave_requests')
+            .select(`id, leave_type, date_from, date_to, created_at,
+              employee:employees!leave_requests_employee_id_fkey(first_name, last_name, employee_no, department)`)
+            .eq('status', 'Pending').eq('l1_approver_id', empId ?? '')
+            .order('created_at', { ascending: false }).limit(6)),
       supabase.from('employees').select('*', { count: 'exact', head: true }).eq('status', 'Active'),
       supabase.from('attendance_daily').select('red_marks_total').gte('date', monthStart).lte('date', today),
       role === 'super_admin' ? supabase.from('employees')
