@@ -2,7 +2,7 @@
 
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
-import { createBrowserClient } from '@supabase/ssr'
+import { getSupabaseBrowser } from '@/lib/supabase-browser'
 import { useEffect, useState } from 'react'
 import {
   Clock, Users, Calendar, FileText, CheckSquare,
@@ -95,10 +95,7 @@ export default function NavSidebar({ role }: Props) {
 
   // Fetch user name + pending approvals count — single client instance
   useEffect(() => {
-    const supabase = createBrowserClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-    )
+    const supabase = getSupabaseBrowser()
 
     async function load() {
       const { data: { user } } = await supabase.auth.getUser()
@@ -129,10 +126,7 @@ export default function NavSidebar({ role }: Props) {
   }, []) // empty deps — run once only
 
   async function handleLogout() {
-    const supabase = createBrowserClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-    )
+    const supabase = getSupabaseBrowser()
     await supabase.auth.signOut()
     router.push('/login')
   }
