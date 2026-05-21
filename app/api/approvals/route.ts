@@ -1,9 +1,24 @@
-import { createRouteHandlerClient } from '@supabase/auth-helpers-nextjs'
+import { createServerClient } from '@supabase/ssr'
 import { cookies } from 'next/headers'
 import { NextResponse } from 'next/server'
 
+function createSupabase() {
+  const cookieStore = cookies()
+  return createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        get(name: string) { return cookieStore.get(name)?.value },
+        set(name: string, value: string, options: any) { try { cookieStore.set({ name, value, ...options }) } catch {} },
+        remove(name: string, options: any) { try { cookieStore.set({ name, value: '', ...options }) } catch {} },
+      },
+    }
+  )
+}
+
 export async function GET(request: Request) {
-  const supabase = createRouteHandlerClient({ cookies })
+  const supabase = createSupabase()
   const { searchParams } = new URL(request.url)
   const countOnly = searchParams.get('count') === '1'
 
@@ -35,10 +50,8 @@ export async function GET(request: Request) {
     .order('created_at', { ascending: false })
 
   if (role === 'super_admin') {
-    // Kush sees all L1_Approved (waiting for his final sign-off)
     leaveQ = leaveQ.eq('status', 'L1_Approved')
   } else {
-    // L1 approvers see Pending assigned to them
     leaveQ = leaveQ.eq('status', 'Pending').eq('l1_approver_id', empId)
   }
 
@@ -53,20 +66,6 @@ export async function GET(request: Request) {
     `)
     .eq('status', 'Pending')
     .order('created_at', { ascending: false })
-
-  if (role !== 'super_admin') {
-    // Non-admin: only see requests from their reportees
-    const { data: reportees } = await supabase
-      .from('employees')
-      .select('id')
-      .eq('reporting_manager_id', empId)
-    const ids = (reportees || []).map((r: any) => r.id)
-    if (ids.length === 0) {
-      timeoffQ = timeoffQ.eq('employee_id', '00000000-0000-0000-0000-000000000000') // empty
-    } else {
-      timeoffQ = timeoffQ.in('employee_id', ids)
-    }
-  }
 
   // ── On Duty Requests ──────────────────────────────────────
   let ondutyQ = supabase
@@ -87,17 +86,18 @@ export async function GET(request: Request) {
       .select('id')
       .eq('reporting_manager_id', empId)
     const ids = (reportees || []).map((r: any) => r.id)
+    const fallback = '00000000-0000-0000-0000-000000000000'
     if (ids.length === 0) {
-      ondutyQ = ondutyQ.eq('employee_id', '00000000-0000-0000-0000-000000000000')
+      timeoffQ = timeoffQ.eq('employee_id', fallback)
+      ondutyQ  = ondutyQ.eq('employee_id', fallback)
     } else {
-      ondutyQ = ondutyQ.in('employee_id', ids)
+      timeoffQ = timeoffQ.in('employee_id', ids)
+      ondutyQ  = ondutyQ.in('employee_id', ids)
     }
   }
 
   const [leaveRes, timeoffRes, ondutyRes] = await Promise.all([
-    leaveQ,
-    timeoffQ,
-    ondutyQ,
+    leaveQ, timeoffQ, ondutyQ,
   ])
 
   const totalCount =
@@ -105,9 +105,7 @@ export async function GET(request: Request) {
     (timeoffRes.data?.length || 0) +
     (ondutyRes.data?.length || 0)
 
-  if (countOnly) {
-    return NextResponse.json({ count: totalCount })
-  }
+  if (countOnly) return NextResponse.json({ count: totalCount })
 
   return NextResponse.json({
     leaves:   leaveRes.data   || [],

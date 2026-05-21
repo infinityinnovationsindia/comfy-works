@@ -1,14 +1,27 @@
-import { createRouteHandlerClient } from '@supabase/auth-helpers-nextjs'
+import { createServerClient } from '@supabase/ssr'
 import { cookies } from 'next/headers'
 import { NextResponse } from 'next/server'
 
-// PATCH /api/approvals/[id]
-// body: { type: 'leave'|'timeoff'|'onduty', action: 'approve'|'reject', comment?: string }
+function createSupabase() {
+  const cookieStore = cookies()
+  return createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        get(name: string) { return cookieStore.get(name)?.value },
+        set(name: string, value: string, options: any) { try { cookieStore.set({ name, value, ...options }) } catch {} },
+        remove(name: string, options: any) { try { cookieStore.set({ name, value: '', ...options }) } catch {} },
+      },
+    }
+  )
+}
+
 export async function PATCH(
   request: Request,
   { params }: { params: { id: string } }
 ) {
-  const supabase = createRouteHandlerClient({ cookies })
+  const supabase = createSupabase()
   const { id } = params
   const body = await request.json()
   const { type, action, comment } = body
@@ -40,20 +53,14 @@ export async function PATCH(
 
     if (action === 'approve') {
       if (role === 'super_admin') {
-        // Final approval — Kush
-        const { error } = await supabase
-          .from('leave_requests')
-          .update({
-            status: 'Approved',
-            l2_approver_id: empId,
-            l2_approved_at: now,
-            l2_comment: comment || null,
-          })
-          .eq('id', id)
+        await supabase.from('leave_requests').update({
+          status: 'Approved',
+          l2_approver_id: empId,
+          l2_approved_at: now,
+          l2_comment: comment || null,
+        }).eq('id', id)
 
-        if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-
-        // Deduct PL balance if applicable
+        // Deduct PL balance
         if (['PL','HPL'].includes(req.leave_type) && req.pl_to_deduct) {
           const fy = getFY()
           const { data: bal } = await supabase
@@ -62,29 +69,24 @@ export async function PATCH(
             .eq('employee_id', req.employee_id)
             .eq('financial_year', fy)
             .single()
-
           if (bal) {
-            await supabase
-              .from('leave_balances')
+            await supabase.from('leave_balances')
               .update({ pl_used: (bal.pl_used || 0) + req.pl_to_deduct })
               .eq('id', bal.id)
           }
         }
 
-        // Update attendance records for approved dates
+        // Update attendance for approved dates
         const dates = getDatesInRange(req.date_from, req.date_to)
         for (const date of dates) {
-          await supabase
-            .from('attendance_daily')
-            .upsert({
-              employee_id: req.employee_id,
-              date,
-              status: req.leave_type,
-              leave_id: id,
-            }, { onConflict: 'employee_id,date' })
+          await supabase.from('attendance_daily').upsert({
+            employee_id: req.employee_id,
+            date,
+            status: req.leave_type,
+            leave_id: id,
+          }, { onConflict: 'employee_id,date' })
         }
 
-        // Audit log
         await supabase.from('audit_log').insert({
           table_name: 'leave_requests',
           record_id: id,
@@ -92,49 +94,23 @@ export async function PATCH(
           old_values: { status: req.status },
           new_values: { status: 'Approved' },
           changed_by: empId,
-          reason: comment || 'Final approval by Kush Patel',
+          reason: comment || 'Final approval',
         })
-
       } else {
-        // L1 approval
-        const { error } = await supabase
-          .from('leave_requests')
-          .update({
-            status: 'L1_Approved',
-            l1_approver_id: empId,
-            l1_approved_at: now,
-            l1_comment: comment || null,
-          })
-          .eq('id', id)
-
-        if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-
-        // Notify Kush via WhatsApp for final approval
-        // (whatsapp.ts sendLeaveApprovalRequest called here in production)
+        await supabase.from('leave_requests').update({
+          status: 'L1_Approved',
+          l1_approver_id: empId,
+          l1_approved_at: now,
+          l1_comment: comment || null,
+        }).eq('id', id)
       }
     } else if (action === 'reject') {
-      const { error } = await supabase
-        .from('leave_requests')
-        .update({
-          status: 'Rejected',
-          rejected_by: empId,
-          rejected_at: now,
-          rejection_reason: comment || null,
-        })
-        .eq('id', id)
-
-      if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-
-      // If employee is already marked absent, flag AAA
-      const today = new Date().toISOString().split('T')[0]
-      if (req.date_from <= today) {
-        await supabase
-          .from('attendance_daily')
-          .update({ status: 'AAA' })
-          .eq('employee_id', req.employee_id)
-          .in('date', getDatesInRange(req.date_from, req.date_to))
-          .in('status', ['AAA_PENDING','A'])
-      }
+      await supabase.from('leave_requests').update({
+        status: 'Rejected',
+        rejected_by: empId,
+        rejected_at: now,
+        rejection_reason: comment || null,
+      }).eq('id', id)
 
       await supabase.from('audit_log').insert({
         table_name: 'leave_requests',
@@ -153,13 +129,7 @@ export async function PATCH(
     const update = action === 'approve'
       ? { status: 'Approved', approved_by: empId, approved_at: now }
       : { status: 'Rejected' }
-
-    const { error } = await supabase
-      .from('time_off_permissions')
-      .update(update)
-      .eq('id', id)
-
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+    await supabase.from('time_off_permissions').update(update).eq('id', id)
   }
 
   // ── ON DUTY ───────────────────────────────────────────────
@@ -167,13 +137,7 @@ export async function PATCH(
     const update = action === 'approve'
       ? { status: 'Approved', approved_by: empId, approved_at: now }
       : { status: 'Rejected' }
-
-    const { error } = await supabase
-      .from('on_duty_requests')
-      .update(update)
-      .eq('id', id)
-
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+    await supabase.from('on_duty_requests').update(update).eq('id', id)
   }
 
   return NextResponse.json({ success: true })
@@ -188,7 +152,7 @@ function getFY(): string {
 function getDatesInRange(from: string, to: string): string[] {
   const dates: string[] = []
   const current = new Date(from)
-  const end     = new Date(to)
+  const end = new Date(to)
   while (current <= end) {
     dates.push(current.toISOString().split('T')[0])
     current.setDate(current.getDate() + 1)

@@ -2,13 +2,13 @@
 
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
-import { createClientComponentClient } from '@supabase/auth-helpers-nextjs'
+import { createBrowserClient } from '@supabase/ssr'
 import { useEffect, useState } from 'react'
 import {
   Clock, Users, Calendar, FileText, CheckSquare,
-  Timer, Navigation2, BarChart3, DollarSign, User,
+  Timer, Navigation, BarChart3, DollarSign, User,
   Settings, LogOut, Flag, ChevronDown, ChevronRight,
-  Menu, X, Sofa, Bell
+  Menu, X, Armchair, Bell
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -64,7 +64,7 @@ const NAV_ITEMS: NavItem[] = [
   },
   {
     label: 'On Duty',
-    icon: Navigation2,
+    icon: Navigation,
     roles: ['super_admin','production_head','design_head','project_head','supervisor','employee'],
     children: [
       { label: 'Apply On Duty', href: '/on-duty/apply' },
@@ -121,7 +121,10 @@ const NAV_ITEMS: NavItem[] = [
 export default function Sidebar() {
   const pathname  = usePathname()
   const router    = useRouter()
-  const supabase  = createClientComponentClient()
+  const supabase  = createBrowserClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  )
 
   const [userRole,     setUserRole]     = useState<UserRole>('employee')
   const [userName,     setUserName]     = useState('Loading...')
@@ -263,7 +266,7 @@ export default function Sidebar() {
       {/* Brand */}
       <div className="flex items-center gap-2.5 px-4 py-5 border-b border-gray-100">
         <div className="w-8 h-8 bg-[#1D9E75] rounded-lg flex items-center justify-center flex-shrink-0">
-          <Sofa className="h-4 w-4 text-white" />
+          <Armchair className="h-4 w-4 text-white" />
         </div>
         <div className="min-w-0">
           <p className="font-bold text-gray-900 text-sm leading-tight">Comfy Works</p>

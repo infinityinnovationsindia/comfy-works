@@ -1,9 +1,24 @@
-import { createRouteHandlerClient } from '@supabase/auth-helpers-nextjs'
+import { createServerClient } from '@supabase/ssr'
 import { cookies } from 'next/headers'
 import { NextResponse } from 'next/server'
 
+function createSupabase() {
+  const cookieStore = cookies()
+  return createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        get(name: string) { return cookieStore.get(name)?.value },
+        set(name: string, value: string, options: any) { try { cookieStore.set({ name, value, ...options }) } catch {} },
+        remove(name: string, options: any) { try { cookieStore.set({ name, value: '', ...options }) } catch {} },
+      },
+    }
+  )
+}
+
 export async function GET(request: Request) {
-  const supabase = createRouteHandlerClient({ cookies })
+  const supabase = createSupabase()
   const { searchParams } = new URL(request.url)
   const year  = parseInt(searchParams.get('year')  || String(new Date().getFullYear()))
   const month = parseInt(searchParams.get('month') || String(new Date().getMonth() + 1))
@@ -11,12 +26,10 @@ export async function GET(request: Request) {
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  // Date range for the month
   const startDate = `${year}-${String(month).padStart(2,'0')}-01`
   const endDay    = new Date(year, month, 0).getDate()
   const endDate   = `${year}-${String(month).padStart(2,'0')}-${endDay}`
 
-  // Get all active employees
   const { data: employees } = await supabase
     .from('employees')
     .select('id, employee_no, first_name, last_name, department, designation, daily_salary_rate')
@@ -25,7 +38,6 @@ export async function GET(request: Request) {
 
   if (!employees) return NextResponse.json({ employees: [] })
 
-  // Get all daily attendance with red marks for the month
   const { data: attendance } = await supabase
     .from('attendance_daily')
     .select('employee_id, date, red_marks_morning, red_marks_evening, red_marks_total')
@@ -33,7 +45,6 @@ export async function GET(request: Request) {
     .lte('date', endDate)
     .gt('red_marks_total', 0)
 
-  // Group by employee
   const attMap = new Map<string, { morning: number; evening: number; total: number; details: any[] }>()
 
   for (const a of attendance || []) {
@@ -65,11 +76,10 @@ export async function GET(request: Request) {
       morning_marks:     rm?.morning || 0,
       evening_marks:     rm?.evening || 0,
       total_marks:       rm?.total   || 0,
-      details:           rm?.details.sort((a, b) => a.date.localeCompare(b.date)) || [],
+      details:           rm?.details.sort((a: any, b: any) => a.date.localeCompare(b.date)) || [],
     }
   })
 
-  // Sort: most red marks first, then zero marks alphabetically
   result.sort((a, b) => {
     if (b.total_marks !== a.total_marks) return b.total_marks - a.total_marks
     return a.last_name.localeCompare(b.last_name)

@@ -1,22 +1,35 @@
-import { createRouteHandlerClient } from '@supabase/auth-helpers-nextjs'
+import { createServerClient } from '@supabase/ssr'
 import { cookies } from 'next/headers'
 import { NextResponse } from 'next/server'
 
+function createSupabase() {
+  const cookieStore = cookies()
+  return createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        get(name: string) { return cookieStore.get(name)?.value },
+        set(name: string, value: string, options: any) { try { cookieStore.set({ name, value, ...options }) } catch {} },
+        remove(name: string, options: any) { try { cookieStore.set({ name, value: '', ...options }) } catch {} },
+      },
+    }
+  )
+}
+
 export async function GET(request: Request) {
-  const supabase = createRouteHandlerClient({ cookies })
+  const supabase = createSupabase()
   const { searchParams } = new URL(request.url)
 
   const now = new Date()
   const defaultFY = now.getMonth() >= 3
     ? `${now.getFullYear()}-${String(now.getFullYear() + 1).slice(2)}`
     : `${now.getFullYear() - 1}-${String(now.getFullYear()).slice(2)}`
-
   const fy = searchParams.get('fy') || defaultFY
 
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  // Get all active employees with their leave balances
   const { data: employees } = await supabase
     .from('employees')
     .select(`
@@ -29,8 +42,8 @@ export async function GET(request: Request) {
 
   if (!employees) return NextResponse.json({ balances: [] })
 
-  const balances = employees.map(emp => {
-    const lb = (emp.leave_balances as any[])?.find(b => b.financial_year === fy)
+  const balances = employees.map((emp: any) => {
+    const lb = emp.leave_balances?.find((b: any) => b.financial_year === fy)
     return {
       employee_id:     emp.id,
       employee_no:     emp.employee_no,
