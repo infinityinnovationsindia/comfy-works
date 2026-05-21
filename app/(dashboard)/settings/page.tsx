@@ -133,7 +133,7 @@ export default function SettingsPage() {
                     <p className="text-xs text-gray-500 mt-0.5">{job.description}</p>
                     {result && (
                       <p className={`text-xs mt-2 p-2 rounded-lg ${
-                        state === 'success' ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'
+                        state === 'error' ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-700'
                       }`}>
                         {result}
                       </p>

@@ -5,7 +5,7 @@ import { usePathname, useRouter } from 'next/navigation'
 import { getSupabaseBrowser } from '@/lib/supabase-browser'
 import { useEffect, useState } from 'react'
 import {
-  Clock, Users, Calendar, FileText, CheckSquare,
+  LayoutDashboard, Clock, Users, Calendar, FileText, CheckSquare,
   Timer, Navigation, BarChart3, DollarSign, User,
   Settings, LogOut, Flag, ChevronDown, ChevronRight,
   Menu, X, Armchair
@@ -32,6 +32,7 @@ const SUPER: UserRole[] = ['super_admin']
 const FIELD: UserRole[] = ['super_admin','production_head','design_head','project_head','supervisor','employee']
 
 const NAV_ITEMS: NavItem[] = [
+  { label: 'Dashboard', href: '/dashboard', icon: LayoutDashboard, roles: ALL },
   { label: 'Attendance', href: '/attendance', icon: Clock, roles: ALL.filter(r => r !== 'security') },
   {
     label: 'Leave', icon: FileText,
