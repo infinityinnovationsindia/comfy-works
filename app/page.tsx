@@ -1,2 +1,7 @@
-import { redirect } from 'next/navigation';
-export default function Home() { redirect('/attendance'); }
+import { redirect } from 'next/navigation'
+
+// Root redirect — sends authenticated users to dashboard
+// Auth check is handled by the (dashboard) layout
+export default function RootPage() {
+  redirect('/dashboard')
+}

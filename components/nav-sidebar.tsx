@@ -205,7 +205,7 @@ export default function NavSidebar({ role }: Props) {
     return (
       <div className="flex flex-col h-full">
         {/* Brand */}
-        <div className="flex items-center gap-2.5 px-4 py-5 border-b border-gray-100 flex-shrink-0">
+        <Link href="/dashboard" className="flex items-center gap-2.5 px-4 py-5 border-b border-gray-100 flex-shrink-0 hover:bg-gray-50 transition-colors">
           <div className="w-8 h-8 bg-[#1D9E75] rounded-lg flex items-center justify-center flex-shrink-0">
             <Armchair className="h-4 w-4 text-white" />
           </div>
@@ -213,7 +213,7 @@ export default function NavSidebar({ role }: Props) {
             <p className="font-bold text-gray-900 text-sm leading-tight">Comfy Works</p>
             <p className="text-xs text-[#1D9E75] font-medium">{ROLE_LABEL[userRole]}</p>
           </div>
-        </div>
+        </Link>
 
         {/* Nav */}
         <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-0.5">
