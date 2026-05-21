@@ -128,8 +128,11 @@ export default async function DashboardPage() {
       { data: probAlerts },
     ] = await Promise.all([
       supabase.from('attendance_daily')
-        .select(`status, red_marks_total,
-          employee:employees!attendance_daily_employee_id_fkey(first_name, last_name, employee_no, department)`)
+        .select(`status, red_marks_total, check_in,
+          employee:employees!attendance_daily_employee_id_fkey(
+            first_name, last_name, employee_no, department,
+            shift:shifts(start_time, end_time)
+          )`)
         .eq('date', today),
       supabase.from('leave_requests')
         .select(`id, leave_type, date_from, date_to, created_at,
@@ -146,15 +149,35 @@ export default async function DashboardPage() {
         .limit(5) : Promise.resolve({ data: [] }),
     ])
 
-    const present   = todayAll?.filter(a => ['P'].includes(a.status)).length ?? 0
-    const absent    = todayAll?.filter(a => ['A','AAA','AAA_PENDING'].includes(a.status)).length ?? 0
-    const onLeave   = todayAll?.filter(a => ['PL','HPL','UL','HUL'].includes(a.status)).length ?? 0
-    const lateToday = todayAll?.filter(a => (a.red_marks_total ?? 0) > 0).length ?? 0
-    const totalRM   = redMarks?.reduce((s, r) => s + (r.red_marks_total ?? 0), 0) ?? 0
+    // ── Shift-aware calculation ──────────────────────────────────────────
+    // Get shift start in minutes since midnight for a given employee record
+    const shiftStartMins = (emp: any): number => {
+      const t = emp?.shift?.start_time ?? '08:00:00'
+      const [h, m] = (t as string).split(':').map(Number)
+      return h * 60 + m
+    }
+    // Current IST time in minutes since midnight
+    const istMinutes = istNow.getHours() * 60 + istNow.getMinutes()
 
-    const absentList   = (todayAll ?? []).filter(a => ['A','AAA','AAA_PENDING'].includes(a.status))
-    const onLeaveList  = (todayAll ?? []).filter(a => ['PL','HPL','UL','HUL'].includes(a.status))
-    const lateList     = (todayAll ?? []).filter(a => (a.red_marks_total ?? 0) > 0)
+    const present = todayAll?.filter(a => ['P'].includes(a.status)).length ?? 0
+    const onLeave = todayAll?.filter(a => ['PL','HPL','UL','HUL'].includes(a.status)).length ?? 0
+    const totalRM = redMarks?.reduce((s, r) => s + (r.red_marks_total ?? 0), 0) ?? 0
+
+    // Only count as absent if the employee's OWN shift has already started
+    const absentList = (todayAll ?? []).filter(a => {
+      if (!['A','AAA','AAA_PENDING'].includes(a.status)) return false
+      return istMinutes >= shiftStartMins((a.employee as any))
+    })
+    const absent = absentList.length
+
+    // Only count late if their shift has started
+    const lateList = (todayAll ?? []).filter(a => {
+      if ((a.red_marks_total ?? 0) === 0) return false
+      return istMinutes >= shiftStartMins((a.employee as any))
+    })
+    const lateToday = lateList.length
+
+    const onLeaveList = (todayAll ?? []).filter(a => ['PL','HPL','UL','HUL'].includes(a.status))
 
     const { data: myEmp } = empId ? await supabase.from('employees').select('first_name').eq('id', empId).single() : { data: null }
 
@@ -178,12 +201,12 @@ export default async function DashboardPage() {
           </div>
         </div>
 
-        {/* Stat grid */}
+        {/* Stat grid — numbers are shift-aware (absent only counted after each employee's shift starts) */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-          <StatCard label="Present Today"      value={present}                            color="green"  icon={CheckCircle} href="/attendance" />
-          <StatCard label="Absent Today"       value={absent}                             color="red"    icon={XCircle}     href="/attendance" />
-          <StatCard label="On Leave Today"     value={onLeave}                            color="blue"   icon={Calendar}    href="/attendance" />
-          <StatCard label="Late Today"         value={lateToday}                          color="yellow" icon={AlarmClock}  href="/attendance" />
+          <StatCard label="Present Today"  value={present}   color="green"  icon={CheckCircle} href="/attendance" />
+          <StatCard label="Absent Today"   value={absent}    color="red"    icon={XCircle}     href="/attendance" sub="shift started only" />
+          <StatCard label="On Leave Today" value={onLeave}   color="blue"   icon={Calendar}    href="/attendance" />
+          <StatCard label="Late Today"     value={lateToday} color="yellow" icon={AlarmClock}  href="/attendance" sub="shift started only" />
         </div>
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
           <StatCard label="Pending Approval"   value={pendingLeaves?.length ?? 0}         color="orange" icon={CheckSquare} href="/approvals"  sub="Your sign-off" />
