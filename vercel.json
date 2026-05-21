@@ -1,0 +1,16 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/process-attendance",
+      "schedule": "30 18 * * *"
+    },
+    {
+      "path": "/api/cron/monthly-accrual",
+      "schedule": "0 2 1 * *"
+    },
+    {
+      "path": "/api/cron/year-end",
+      "schedule": "0 0 1 4 *"
+    }
+  ]
+}
