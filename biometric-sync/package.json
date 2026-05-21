@@ -1,0 +1,16 @@
+{
+  "name": "comfy-biometric-sync",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ZKTeco X2008 attendance sync to Supabase — runs on factory local machine",
+  "main": "sync.js",
+  "scripts": {
+    "start": "node sync.js",
+    "start:pm2": "pm2 start ecosystem.config.js"
+  },
+  "dependencies": {
+    "node-zklib": "^0.6.1",
+    "@supabase/supabase-js": "^2.44.0",
+    "dotenv": "^16.4.5"
+  }
+}
