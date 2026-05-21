@@ -92,6 +92,20 @@ async function handler() {
         const empPunches = punchMap.get(emp.id) || []
         const shift      = emp.shift_id ? shiftMap.get(emp.shift_id) : null
 
+        // ── Skip if manually corrected (e.g. sandwich rule, manual override) ──
+        const { data: existingRecord } = await supabase
+          .from('attendance_daily')
+          .select('is_manually_corrected, status')
+          .eq('employee_id', emp.id)
+          .eq('date', today)
+          .maybeSingle()
+
+        if (existingRecord?.is_manually_corrected) {
+          // Preserve manual correction — do not overwrite
+          processed++
+          continue
+        }
+
         let status: string
         let checkIn:  Date | null = null
         let checkOut: Date | null = null
