@@ -1,0 +1,16 @@
+
+Add these items to your existing sidebar component under appropriate sections:
+
+FACTORY OPERATIONS section:
+- /overtime → "Overtime" (icon: Clock)
+- /work-permission → "Work Permission" (icon: Shield)
+- /vehicles → "Vehicles" (icon: Truck)
+
+GATE section:
+- /visitors → "Visitors" (icon: Users)
+- /security → "Security Gate" (icon: Lock) — show on all roles
+
+FINANCE section (after Payroll):
+- /petty-cash → "Petty Cash" (icon: Wallet) — show for accounts + super_admin + all
+
+Add to approvals inbox: overtime_requests, work_permissions, petty_cash_requests
