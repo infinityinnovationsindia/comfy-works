@@ -8,7 +8,8 @@ import {
   LayoutDashboard, Clock, FileText, CheckSquare,
   Timer, Navigation, BarChart3, DollarSign, User,
   Settings, LogOut, Flag, ChevronDown, ChevronRight,
-  Menu, X, Armchair, Users, Calendar
+  Menu, X, Armchair, Users, Calendar, Shield, Truck,
+  Wallet, Lock, AlarmClock
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -27,7 +28,7 @@ interface NavItem {
 }
 interface NavSection {
   id: string
-  label: string | null   // null = no heading
+  label: string | null
   items: NavItem[]
 }
 
@@ -45,6 +46,9 @@ const MGMT: UserRole[] = [
 ]
 const ADMIN: UserRole[] = ['super_admin','accounts']
 const SUPER: UserRole[] = ['super_admin']
+const FACTORY: UserRole[] = [
+  'super_admin','production_head','supervisor','hr_assistant',
+]
 
 const NAV_SECTIONS: NavSection[] = [
   // ── Everyone ───────────────────────────────────────────────────────────
@@ -87,13 +91,33 @@ const NAV_SECTIONS: NavSection[] = [
       { label: 'Employees', href: '/employees', icon: Users,       roles: MGMT },
     ],
   },
+  // ── Factory Operations ─────────────────────────────────────────────────
+  {
+    id: 'factory',
+    label: 'FACTORY',
+    items: [
+      { label: 'Overtime',         href: '/overtime',         icon: AlarmClock, roles: FACTORY },
+      { label: 'Work Permission',  href: '/work-permission',  icon: Shield,     roles: FACTORY },
+      { label: 'Vehicles',         href: '/vehicles',         icon: Truck,      roles: FACTORY },
+    ],
+  },
+  // ── Gate ───────────────────────────────────────────────────────────────
+  {
+    id: 'gate',
+    label: 'GATE',
+    items: [
+      { label: 'Visitors',      href: '/visitors', icon: Users, roles: ALL },
+      { label: 'Security Gate', href: '/security', icon: Lock,  roles: ALL },
+    ],
+  },
   // ── Reports & finance ──────────────────────────────────────────────────
   {
     id: 'reports',
     label: 'REPORTS',
     items: [
-      { label: 'Red Marks', href: '/red-marks', icon: Flag,        roles: ['super_admin','accounts','supervisor','production_head','hr_assistant'] },
-      { label: 'Payroll',   href: '/payroll',   icon: DollarSign,  roles: ADMIN },
+      { label: 'Red Marks', href: '/red-marks',  icon: Flag,       roles: ['super_admin','accounts','supervisor','production_head','hr_assistant'] },
+      { label: 'Payroll',   href: '/payroll',    icon: DollarSign, roles: ADMIN },
+      { label: 'Petty Cash',href: '/petty-cash', icon: Wallet,     roles: ALL },
     ],
   },
   // ── Admin ──────────────────────────────────────────────────────────────
@@ -132,7 +156,6 @@ export default function NavSidebar({ role }: Props) {
   const [mobileOpen,   setMobileOpen]   = useState(false)
   const [expanded,     setExpanded]     = useState<string[]>([])
 
-  // Auto-expand active parent
   useEffect(() => {
     NAV_SECTIONS.forEach(section => {
       section.items.forEach(item => {
@@ -245,7 +268,6 @@ export default function NavSidebar({ role }: Props) {
   function SidebarContent() {
     return (
       <div className="flex flex-col h-full">
-        {/* Brand / home link */}
         <Link
           href="/dashboard"
           onClick={() => setMobileOpen(false)}
@@ -260,7 +282,6 @@ export default function NavSidebar({ role }: Props) {
           </div>
         </Link>
 
-        {/* Grouped nav */}
         <nav className="flex-1 overflow-y-auto px-3 py-3 space-y-4">
           {NAV_SECTIONS.map(section => {
             const visible = section.items.filter(item => item.roles.includes(userRole))
@@ -280,7 +301,6 @@ export default function NavSidebar({ role }: Props) {
           })}
         </nav>
 
-        {/* Bottom: profile + logout */}
         <div className="border-t border-gray-100 px-3 py-3 space-y-0.5 flex-shrink-0">
           <Link
             href="/profile"
@@ -307,7 +327,6 @@ export default function NavSidebar({ role }: Props) {
 
   return (
     <>
-      {/* Mobile hamburger */}
       <button
         onClick={() => setMobileOpen(true)}
         className="fixed top-4 left-4 z-50 lg:hidden bg-white border border-gray-200 rounded-lg p-2 shadow-sm"
