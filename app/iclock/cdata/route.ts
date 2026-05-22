@@ -1,157 +1,190 @@
-/**
- * Comfy Works — ZKTeco ADMS Receiver
- * File location: app/iclock/cdata/route.ts
- *
- * ZKTeco X2008 firmware hardcodes /iclock/cdata as the push endpoint.
- * This handles the full ADMS handshake + attendance push.
- *
- * Device serial: 0077142900300
- */
+export const dynamic = 'force-dynamic'
 
-import { createClient } from '@supabase/supabase-js';
-import { NextRequest, NextResponse } from 'next/server';
+import { createClient } from '@supabase/supabase-js'
+import { NextRequest, NextResponse } from 'next/server'
 
-const DEVICE_ID = 'FACTORY_X2008';
-
-function admin() {
+function adminClient() {
   return createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!,
     { auth: { autoRefreshToken: false, persistSession: false } }
-  );
+  )
 }
 
-// Cache employee map
-let empCache: Map<number, { id: string; employee_no: string }> | null = null;
-let empCacheAt = 0;
-
-async function getEmpMap() {
-  if (empCache && Date.now() - empCacheAt < 10 * 60 * 1000) return empCache;
-  const supabase = admin();
-  const { data } = await supabase
-    .from('employees')
-    .select('id, employee_no, zkteco_user_id')
-    .eq('status', 'Active')
-    .not('zkteco_user_id', 'is', null);
-  empCache = new Map((data ?? []).map(e => [e.zkteco_user_id, { id: e.id, employee_no: e.employee_no }]));
-  empCacheAt = Date.now();
-  return empCache;
+// ── The exact config text the ZKTeco X2008 expects ────────────────────────
+// Every field is required. Wrong values = device silently disconnects.
+//
+// TimeZone=5.5     → IST (India Standard Time = UTC+5:30). CRITICAL.
+//                    If wrong (e.g. 8 for China), device may reject or store wrong times.
+// Realtime=1       → Push attendance immediately on each punch (not just at TransTimes)
+// Delay=10         → Heartbeat every 10 seconds (device checks for server commands)
+// ErrorDelay=10    → Retry after 10s if connection fails (default is 30s — too slow)
+// ATTLOGStamp=None → Accept all records (no timestamp filter)
+// OPERLOGStamp=9999→ Ignore operation logs
+function buildCdataConfig(): string {
+  return [
+    'ATTLOGStamp=None',
+    'OPERLOGStamp=9999',
+    'ATTPHOTOStamp=None',
+    'ErrorDelay=10',
+    'Delay=10',
+    'TransTimes=00:00;09:00',
+    'TransInterval=1',
+    'TransFlag=TransData AttLog OpLog',
+    'TimeZone=5.5',
+    'Realtime=1',
+    'Encrypt=None',
+  ].join('\n')
 }
 
-// GET — device check-in handshake + command poll
+// ── GET /iclock/cdata — device registration / heartbeat check-in ──────────
+// Called by device on boot and periodically as a heartbeat.
+// Must return the config text with correct Content-Type: text/plain
 export async function GET(request: NextRequest) {
-  const { searchParams } = new URL(request.url);
-  const sn      = searchParams.get('SN') ?? '';
-  const options = searchParams.get('options');
+  const { searchParams } = request.nextUrl
+  const sn      = searchParams.get('SN') || 'unknown'
+  const options = searchParams.get('options')
 
-  console.log(`ZKTeco GET /iclock/cdata SN=${sn} options=${options}`);
+  console.log(`[ZKTeco] Device check-in | SN=${sn} | options=${options}`)
 
-  if (options === 'all') {
-    // Initial handshake — tell device to push ATTLOGs
-    const now = new Date();
-    const pad = (n: number) => String(n).padStart(2, '0');
-    const serverTime = `${now.getUTCFullYear()}-${pad(now.getUTCMonth()+1)}-${pad(now.getUTCDate())} ${pad(now.getUTCHours())}:${pad(now.getUTCMinutes())}:${pad(now.getUTCSeconds())}`;
-
-    const body = [
-      `GET OPTION FROM: ${sn}`,
-      `ATTLOGStamp=None`,
-      `OPERLOGStamp=9999`,
-      `ATTPHOTOStamp=None`,
-      `ErrorDelay=30`,
-      `Delay=10`,
-      `TransTimes=00:00;23:59`,
-      `TransInterval=1`,
-      `TransFlag=TransData AttLog`,
-      `TimeZone=5`,
-      `Realtime=1`,
-      `Encrypt=None`,
-      `ServerVer=2.4.2`,
-      `PushProtVer=2.4.2`,
-      `PushOptionsFlag=1`,
-      `ServerTime=${serverTime}`,
-    ].join('\n');
-
-    return new NextResponse(body, {
-      status: 200,
-      headers: { 'Content-Type': 'text/plain; charset=UTF-8' }
-    });
+  // Log the device connection to Supabase for monitoring
+  try {
+    const supabase = adminClient()
+    await supabase.from('zkteco_device_log').upsert({
+      serial_number: sn,
+      last_seen:     new Date().toISOString(),
+      status:        'online',
+    }, { onConflict: 'serial_number' }).select()
+    // Note: zkteco_device_log table is optional monitoring — ignore if doesn't exist
+  } catch (_) {
+    // Table may not exist yet — that's OK, don't crash the route
   }
 
-  // Command poll — no commands
-  return new NextResponse('OK', {
+  // Return the config — MUST be text/plain, MUST end with newline
+  return new Response(buildCdataConfig() + '\n', {
     status: 200,
-    headers: { 'Content-Type': 'text/plain' }
-  });
+    headers: {
+      'Content-Type':  'text/plain',
+      'Cache-Control': 'no-cache, no-store',
+      'Pragma':        'no-cache',
+    },
+  })
 }
 
-// POST — device pushes attendance records
+// ── POST /iclock/cdata — device pushes attendance records ─────────────────
+// Called on every finger/face punch when Realtime=1.
+// Body is plain text, one record per line:
+// Format: ATTLOG  UserID  Timestamp  Status  Verify  WorkCode  Reserved
+// Example: 5       2024-01-15 08:03:22  1       0       0         0
 export async function POST(request: NextRequest) {
-  const { searchParams } = new URL(request.url);
-  const sn    = searchParams.get('SN') ?? '';
-  const table = searchParams.get('table') ?? '';
+  const { searchParams } = request.nextUrl
+  const sn    = searchParams.get('SN') || 'unknown'
+  const table = searchParams.get('table') || ''
 
-  console.log(`ZKTeco POST /iclock/cdata SN=${sn} table=${table}`);
+  const body = await request.text()
+  console.log(`[ZKTeco] POST | SN=${sn} | table=${table}`)
+  console.log(`[ZKTeco] Body:\n${body}`)
 
-  if (table !== 'ATTLOG') {
-    return new NextResponse('OK', { status: 200 });
+  // Only process attendance logs
+  if (!body.includes('ATTLOG') && !table.includes('ATTLOG') && !body.includes('\t')) {
+    return new Response('OK', { status: 200, headers: { 'Content-Type': 'text/plain' } })
   }
 
-  try {
-    const body   = await request.text();
-    const lines  = body.trim().split('\n').filter(Boolean);
-    const empMap = await getEmpMap();
-    const supabase = admin();
+  const supabase = adminClient()
+  const inserted: string[] = []
+  const errors:   string[] = []
 
-    let inserted = 0;
-    const rows = [];
+  // Parse each line
+  const lines = body.split('\n').map(l => l.trim()).filter(Boolean)
+  for (const line of lines) {
+    // Skip header line "ATTLOG"
+    if (line === 'ATTLOG' || line.startsWith('ATTLOG\t')) continue
 
-    for (const line of lines) {
-      // ADMS format: "UserID\tDateTime\tStatus\tVerify\tWorkCode\tReserved"
-      const parts = line.trim().split('\t');
-      if (parts.length < 2) continue;
+    // Tab-separated: UserID  Timestamp  Status  Verify  WorkCode  Reserved
+    const parts = line.split('\t')
+    if (parts.length < 2) continue
 
-      const zkId    = parseInt(parts[0].trim(), 10);
-      const dateStr = parts[1].trim();
-      const status  = parseInt(parts[2]?.trim() ?? '0', 10);
+    const zkUserId  = parseInt(parts[0], 10)
+    const rawTime   = parts[1]   // e.g. "2024-01-15 08:03:22"
+    const status    = parts[2] ? parseInt(parts[2], 10) : 0
 
-      if (isNaN(zkId) || !dateStr.match(/\d{4}-\d{2}-\d{2}/)) continue;
+    if (isNaN(zkUserId) || !rawTime) continue
 
-      const emp = empMap.get(zkId);
-      if (!emp) { console.warn(`ZK push: unknown user ${zkId}`); continue; }
-
-      const punchedAt = new Date(dateStr.replace(' ', 'T') + '+05:30').toISOString();
-      const punchType = status === 1 ? 'Check-Out' : 'Check-In';
-
-      rows.push({
-        employee_id: emp.id,
-        punched_at:  punchedAt,
-        punch_type:  punchType,
-        device_id:   DEVICE_ID,
-        raw_data:    { src: 'adms_push', sn, zkId, dateStr, status },
-      });
+    // The timestamp from the device is in LOCAL TIME (IST, since TimeZone=5.5)
+    // We need to store as UTC in Supabase. IST = UTC+5:30
+    // Parse as IST and convert to UTC
+    let punchedAtUTC: string
+    try {
+      // rawTime format: "YYYY-MM-DD HH:MM:SS"
+      const [datePart, timePart] = rawTime.split(' ')
+      if (!datePart || !timePart) continue
+      // Append +05:30 to tell JS this is IST
+      const istString = `${datePart}T${timePart}+05:30`
+      const date = new Date(istString)
+      if (isNaN(date.getTime())) continue
+      punchedAtUTC = date.toISOString()
+    } catch {
+      errors.push(`Could not parse timestamp: ${rawTime}`)
+      continue
     }
 
-    if (rows.length > 0) {
-      const { error } = await supabase
-        .from('attendance_punches')
-        .upsert(rows, { onConflict: 'employee_id,punched_at', ignoreDuplicates: true });
+    // Find the employee in our DB by their ZKTeco user ID
+    // Convention: ZK User ID matches the numeric part of CF number
+    // CF-001 → zkteco_user_id=1, CF-027 → zkteco_user_id=27
+    const { data: emp, error: empErr } = await supabase
+      .from('employees')
+      .select('id, employee_no')
+      .eq('zkteco_user_id', zkUserId)
+      .single()
 
-      if (!error) {
-        inserted = rows.length;
-        console.log(`ZKTeco PUSH from ${sn}: ${inserted} punch(es) — ${rows.map(r => r.punch_type + ' ' + r.punched_at).join(', ')}`);
-      } else {
-        console.error(`ZKTeco PUSH insert error: ${error.message}`);
+    if (empErr || !emp) {
+      // Try matching by employee_no suffix
+      const cfNo = `CF-${String(zkUserId).padStart(3, '0')}`
+      const { data: emp2 } = await supabase
+        .from('employees')
+        .select('id, employee_no')
+        .eq('employee_no', cfNo)
+        .single()
+
+      if (!emp2) {
+        errors.push(`Employee not found for ZK User ID ${zkUserId}`)
+        continue
       }
+
+      // Insert punch record
+      const { error: insertErr } = await supabase
+        .from('attendance_punches')
+        .upsert({
+          employee_id: emp2.id,
+          punched_at:  punchedAtUTC,
+          device_id:   sn,
+          raw_data:    { line, zk_user_id: zkUserId, status, sn },
+        }, { onConflict: 'employee_id,punched_at' })
+
+      if (insertErr) errors.push(`Insert failed for ${cfNo}: ${insertErr.message}`)
+      else inserted.push(`${cfNo} @ ${rawTime}`)
+
+    } else {
+      const { error: insertErr } = await supabase
+        .from('attendance_punches')
+        .upsert({
+          employee_id: emp.id,
+          punched_at:  punchedAtUTC,
+          device_id:   sn,
+          raw_data:    { line, zk_user_id: zkUserId, status, sn },
+        }, { onConflict: 'employee_id,punched_at' })
+
+      if (insertErr) errors.push(`Insert failed for ${emp.employee_no}: ${insertErr.message}`)
+      else inserted.push(`${emp.employee_no} @ ${rawTime}`)
     }
-
-    // ADMS response: acknowledge with record count
-    return new NextResponse(`OK: ${inserted}`, {
-      status: 200,
-      headers: { 'Content-Type': 'text/plain' }
-    });
-
-  } catch (err: any) {
-    console.error('ZKTeco PUSH error:', err.message);
-    return new NextResponse('OK', { status: 200 }); // always 200 so device doesn't retry endlessly
   }
+
+  console.log(`[ZKTeco] Processed: ${inserted.length} inserted, ${errors.length} errors`)
+  if (errors.length > 0) console.error(`[ZKTeco] Errors:`, errors)
+
+  // MUST return exactly "OK" — device expects this to confirm receipt
+  return new Response('OK', {
+    status: 200,
+    headers: { 'Content-Type': 'text/plain' },
+  })
 }
