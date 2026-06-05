@@ -12,7 +12,7 @@ export default function NewWorkPermPage() {
   const [me, setMe] = useState<any>(null)
 
   useEffect(() => {
-    fetch('/api/employees').then(r=>r.json()).then(d=>setEmployees(d.filter((e:any)=>e.status==='Active')))
+    fetch('/api/employees/simple').then(r=>r.json()).then(d=>setEmployees(d.employees || []))
     fetch('/api/auth/me').then(r=>r.json()).then(setMe)
   },[])
 

@@ -24,7 +24,7 @@ export async function GET() {
     const { data: account } = await supabase
       .from('user_accounts').select('role').eq('id', user.id).single()
 
-    const allowed = ['super_admin', 'hr_assistant', 'supervisor', 'production_head', 'design_head', 'project_head', 'accounts']
+    const allowed = ['super_admin', 'hr_assistant', 'supervisor', 'production_head', 'design_head', 'project_head', 'accounts', 'security']
     if (!allowed.includes(account?.role ?? '')) {
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
     }
