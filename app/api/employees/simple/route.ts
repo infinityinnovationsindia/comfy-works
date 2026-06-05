@@ -2,7 +2,7 @@ export const dynamic = 'force-dynamic'
 
 import { createServerClient } from '@supabase/ssr'
 import { cookies } from 'next/headers'
-import { NextResponse } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
 
 function createSupabase() {
   const cookieStore = cookies()
@@ -14,8 +14,13 @@ function createSupabase() {
 }
 
 // GET /api/employees/simple
-// Returns minimal employee list for dropdowns — only for admins/supervisors/hr_assistant
-export async function GET() {
+// Returns minimal employee list for dropdowns.
+//
+// Query params:
+//   ?mode=workers  -> only people selectable as workers (excludes partners + test users) [DEFAULT]
+//   ?mode=all      -> all active employees including partners (for visitor host, approvers, etc.)
+//
+export async function GET(request: NextRequest) {
   try {
     const supabase = createSupabase()
     const { data: { user } } = await supabase.auth.getUser()
@@ -29,11 +34,19 @@ export async function GET() {
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
     }
 
-    const { data: employees } = await supabase
+    const mode = request.nextUrl.searchParams.get('mode') ?? 'workers'
+
+    let query = supabase
       .from('employees')
-      .select('id, employee_no, first_name, last_name, department, designation')
+      .select('id, employee_no, first_name, last_name, department, designation, selectable_as_worker')
       .eq('status', 'Active')
       .order('first_name')
+
+    if (mode === 'workers') {
+      query = query.eq('selectable_as_worker', true)
+    }
+
+    const { data: employees } = await query
 
     return NextResponse.json({ employees: employees || [] })
   } catch (err: any) {
