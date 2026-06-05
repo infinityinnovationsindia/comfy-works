@@ -18,7 +18,8 @@ function createSupabase() {
 //
 // Query params:
 //   ?mode=workers  -> only people selectable as workers (excludes partners + test users) [DEFAULT]
-//   ?mode=all      -> all active employees including partners (for visitor host, approvers, etc.)
+//   ?mode=hosts    -> only people who can host visitors (partners + designated hosts)
+//   ?mode=all      -> all active employees
 //
 export async function GET(request: NextRequest) {
   try {
@@ -38,13 +39,16 @@ export async function GET(request: NextRequest) {
 
     let query = supabase
       .from('employees')
-      .select('id, employee_no, first_name, last_name, department, designation, selectable_as_worker')
+      .select('id, employee_no, first_name, last_name, department, designation, selectable_as_worker, is_visitor_host')
       .eq('status', 'Active')
       .order('first_name')
 
     if (mode === 'workers') {
       query = query.eq('selectable_as_worker', true)
+    } else if (mode === 'hosts') {
+      query = query.eq('is_visitor_host', true)
     }
+    // mode === 'all' applies no extra filter
 
     const { data: employees } = await query
 

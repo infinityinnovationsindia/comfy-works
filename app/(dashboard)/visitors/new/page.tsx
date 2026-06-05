@@ -9,7 +9,7 @@ export default function NewVisitorPage() {
   const [form, setForm] = useState({ name:'', company:'', purpose:'', host_employee_id:'', id_proof_type:'Aadhaar', id_proof_number:'', security_notes:'' })
   const [saving, setSaving] = useState(false)
 
-  useEffect(()=>{fetch('/api/employees/simple?mode=all').then(r=>r.json()).then(d=>setEmployees(d.employees || []))},[])
+  useEffect(()=>{fetch('/api/employees/simple?mode=hosts').then(r=>r.json()).then(d=>setEmployees(d.employees || []))},[])
 
   async function submit() {
     if(!form.name||!form.purpose||!form.host_employee_id){alert('Name, purpose and host are required');return}
