@@ -7,6 +7,7 @@ type Health = {
   checked_at: string
   bridge: any
   admin: any
+  database: any
 }
 
 type RestartEntry = {
@@ -147,10 +148,11 @@ export default function SystemHealthPage() {
       </div>
 
       {/* Detail cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
         <DeviceCard bridge={bridge} />
         <ServiceCard title="Biometric Bridge" data={bridge} />
         <ServiceCard title="Admin Service" data={admin} />
+        <DatabaseCard data={health?.database} />
       </div>
 
       {/* Restart button */}
@@ -290,6 +292,70 @@ function formatUptime(seconds: number): string {
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m`
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`
   return `${Math.floor(seconds / 86400)}d ${Math.floor((seconds % 86400) / 3600)}h`
+}
+function DatabaseCard({ data }: { data: any }) {
+  const ok = data?.status === 'ok'
+  const responseMs: number | null = data?.response_ms ?? null
+
+  // Classify response time
+  const isFast = responseMs != null && responseMs < 200
+  const isSlow = responseMs != null && responseMs >= 200 && responseMs < 1000
+  const isVerySlow = responseMs != null && responseMs >= 1000
+
+  const cardBg =
+    !ok ? 'bg-red-50 border-red-200' :
+    isVerySlow ? 'bg-yellow-50 border-yellow-200' :
+    'bg-white'
+
+  const badgeStyle =
+    !ok ? 'bg-red-100 text-red-700' :
+    isVerySlow ? 'bg-yellow-100 text-yellow-700' :
+    'bg-green-100 text-green-700'
+
+  const badgeText =
+    !ok ? 'Disconnected' :
+    isVerySlow ? 'Degraded' :
+    'Connected'
+
+  return (
+    <div className={`rounded-2xl border p-4 ${cardBg}`}>
+      <div className="flex items-center justify-between mb-2">
+        <div className="font-semibold">Database</div>
+        <div className={`text-xs px-2 py-1 rounded-full ${badgeStyle}`}>
+          {badgeText}
+        </div>
+      </div>
+      {ok ? (
+        <div className="space-y-1 text-xs text-gray-600">
+          <div>Provider: <span className="font-medium text-gray-900">Supabase</span></div>
+          {data.region && <div>Region: <span className="font-medium text-gray-900">{data.region}</span></div>}
+          <div>
+            Response time:{' '}
+            <span className={`font-medium ${
+              isFast ? 'text-green-700' :
+              isSlow ? 'text-gray-900' :
+              'text-yellow-700'
+            }`}>
+              {responseMs != null ? `${responseMs}ms` : '—'}
+            </span>
+            {isFast && <span className="text-green-600 ml-1">⚡</span>}
+          </div>
+          {data.shifts_count != null && (
+            <div>Shifts table: <span className="font-medium text-gray-900">{data.shifts_count} rows</span></div>
+          )}
+          {isVerySlow && (
+            <div className="mt-2 p-2 bg-white/60 rounded text-xs text-yellow-800 border border-yellow-200">
+              Response slower than usual. Check Supabase status page.
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="text-xs text-red-700">
+          {data?.error || 'Database unreachable'}
+        </div>
+      )}
+    </div>
+  )
 }
 function DeviceCard({ bridge }: { bridge: any }) {
   const bridgeOk = bridge?.status === 'ok'

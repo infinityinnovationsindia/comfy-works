@@ -1,10 +1,11 @@
 export const dynamic = 'force-dynamic'
 
 import { createServerClient } from '@supabase/ssr'
+import { createClient } from '@supabase/supabase-js'
 import { cookies } from 'next/headers'
 import { NextResponse } from 'next/server'
 
-function createSupabase() {
+function createAuthSupabase() {
   const cookieStore = cookies()
   return createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -13,8 +14,15 @@ function createSupabase() {
   )
 }
 
+function createServiceSupabase() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  )
+}
+
 export async function GET() {
-  const supabase = createSupabase()
+  const supabase = createAuthSupabase()
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
@@ -35,29 +43,30 @@ export async function GET() {
     return NextResponse.json({ error: 'BRIDGE URLs not configured' }, { status: 500 })
   }
 
-  let bridge: any = null
-  let bridgeError: string | null = null
-  try {
-    const r = await fetch(bridgeUrl, { signal: AbortSignal.timeout(5000), cache: 'no-store' })
-    if (r.ok) bridge = await r.json()
-    else bridgeError = `Bridge returned ${r.status}`
-  } catch (e: any) {
-    bridgeError = e.message || 'Bridge unreachable'
-  }
+  // Run all 3 checks in parallel
+  const [bridgeResult, adminResult, dbResult] = await Promise.all([
+    checkBridge(bridgeUrl),
+    checkAdmin(adminUrl),
+    checkDatabase(),
+  ])
 
-  let admin: any = null
-  let adminError: string | null = null
-  try {
-    const r = await fetch(`${adminUrl}/admin/health`, { signal: AbortSignal.timeout(5000), cache: 'no-store' })
-    if (r.ok) admin = await r.json()
-    else adminError = `Admin returned ${r.status}`
-  } catch (e: any) {
-    adminError = e.message || 'Admin service unreachable'
-  }
+  const bridge = bridgeResult.data
+  const bridgeError = bridgeResult.error
+  const admin = adminResult.data
+  const adminError = adminResult.error
+  const database = dbResult.data
+  const databaseError = dbResult.error
 
+  // Overall status considers all 3 services
+  const services = [
+    !!bridge,
+    !!admin,
+    !!database && database.status === 'ok',
+  ]
+  const upCount = services.filter(Boolean).length
   const overallStatus =
-    bridge && admin ? 'healthy' :
-    bridge || admin ? 'degraded' :
+    upCount === 3 ? 'healthy' :
+    upCount > 0 ? 'degraded' :
     'down'
 
   return NextResponse.json({
@@ -65,5 +74,58 @@ export async function GET() {
     checked_at: new Date().toISOString(),
     bridge: bridge || { status: 'error', error: bridgeError },
     admin: admin || { status: 'error', error: adminError },
+    database: database || { status: 'error', error: databaseError },
   })
+}
+
+async function checkBridge(url: string) {
+  try {
+    const r = await fetch(url, { signal: AbortSignal.timeout(5000), cache: 'no-store' })
+    if (r.ok) return { data: await r.json(), error: null }
+    return { data: null, error: `Bridge returned ${r.status}` }
+  } catch (e: any) {
+    return { data: null, error: e.message || 'Bridge unreachable' }
+  }
+}
+
+async function checkAdmin(adminUrl: string) {
+  try {
+    const r = await fetch(`${adminUrl}/admin/health`, {
+      signal: AbortSignal.timeout(5000),
+      cache: 'no-store',
+    })
+    if (r.ok) return { data: await r.json(), error: null }
+    return { data: null, error: `Admin returned ${r.status}` }
+  } catch (e: any) {
+    return { data: null, error: e.message || 'Admin service unreachable' }
+  }
+}
+
+async function checkDatabase() {
+  const start = Date.now()
+  try {
+    const svc = createServiceSupabase()
+    // Cheap query: count rows in shifts (small static reference table)
+    const { error, count } = await svc
+      .from('shifts')
+      .select('*', { count: 'exact', head: true })
+    const responseMs = Date.now() - start
+
+    if (error) {
+      return { data: null, error: error.message }
+    }
+
+    return {
+      data: {
+        status: 'ok',
+        response_ms: responseMs,
+        region: 'ap-south-1 (Mumbai)',
+        shifts_count: count ?? 0,
+        checked_at: new Date().toISOString(),
+      },
+      error: null,
+    }
+  } catch (e: any) {
+    return { data: null, error: e.message || 'Database unreachable' }
+  }
 }
