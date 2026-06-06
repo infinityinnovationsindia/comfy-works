@@ -115,7 +115,7 @@ export default function SystemHealthPage() {
             <Activity className="w-6 h-6" /> System Health
           </h1>
           <p className="text-sm text-gray-600 mt-1">
-            Live status of biometric bridge and admin service
+            Live status of all system components
           </p>
         </div>
         <button
