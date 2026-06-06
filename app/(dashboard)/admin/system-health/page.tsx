@@ -147,7 +147,8 @@ export default function SystemHealthPage() {
       </div>
 
       {/* Detail cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+        <DeviceCard bridge={bridge} />
         <ServiceCard title="Biometric Bridge" data={bridge} />
         <ServiceCard title="Admin Service" data={admin} />
       </div>
@@ -289,4 +290,88 @@ function formatUptime(seconds: number): string {
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m`
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`
   return `${Math.floor(seconds / 86400)}d ${Math.floor((seconds % 86400) / 3600)}h`
+}
+function DeviceCard({ bridge }: { bridge: any }) {
+  const bridgeOk = bridge?.status === 'ok'
+  const pollAge = bridge?.last_device_poll_age_seconds
+  const lastPunchAge = bridge?.last_punch_age_seconds
+  const punchesToday = bridge?.punches_today
+  const deviceSerial = bridge?.device_serial
+
+  // Device status logic
+  // Connected: device polled in last 60 sec (device polls every ~10 sec normally)
+  // Stale:     polled in last 5 min (network blip or USB hiccup)
+  // Offline:   no poll in 5+ min OR bridge itself is down
+  let deviceStatus: 'connected' | 'stale' | 'offline' | 'unknown' = 'unknown'
+  if (!bridgeOk || pollAge == null) {
+    deviceStatus = 'offline'
+  } else if (pollAge < 60) {
+    deviceStatus = 'connected'
+  } else if (pollAge < 300) {
+    deviceStatus = 'stale'
+  } else {
+    deviceStatus = 'offline'
+  }
+
+  const isConnected = deviceStatus === 'connected'
+  const isStale = deviceStatus === 'stale'
+  const isOffline = deviceStatus === 'offline'
+
+  const cardBg =
+    isConnected ? 'bg-white' :
+    isStale ? 'bg-yellow-50 border-yellow-200' :
+    'bg-red-50 border-red-200'
+
+  const badgeStyle =
+    isConnected ? 'bg-green-100 text-green-700' :
+    isStale ? 'bg-yellow-100 text-yellow-700' :
+    'bg-red-100 text-red-700'
+
+  const badgeText =
+    isConnected ? 'Connected' :
+    isStale ? 'Stale' :
+    'Offline'
+
+  return (
+    <div className={`rounded-2xl border p-4 ${cardBg}`}>
+      <div className="flex items-center justify-between mb-2">
+        <div className="font-semibold">Biometric Device</div>
+        <div className={`text-xs px-2 py-1 rounded-full ${badgeStyle}`}>
+          {badgeText}
+        </div>
+      </div>
+      <div className="space-y-1 text-xs text-gray-600">
+        <div>Model: <span className="font-medium text-gray-900">ZKTeco X2008</span></div>
+        {deviceSerial && (
+          <div>Serial: <span className="font-medium text-gray-900">{deviceSerial}</span></div>
+        )}
+        <div>
+          Last heartbeat:{' '}
+          <span className="font-medium text-gray-900">
+            {pollAge != null ? formatAge(pollAge) : '—'}
+          </span>
+        </div>
+        <div>
+          Last punch:{' '}
+          <span className="font-medium text-gray-900">
+            {lastPunchAge != null ? formatAge(lastPunchAge) : 'No punches yet'}
+          </span>
+        </div>
+        <div>
+          Punches today:{' '}
+          <span className="font-medium text-gray-900">{punchesToday ?? '—'}</span>
+        </div>
+        {isOffline && (
+          <div className="mt-2 p-2 bg-white/60 rounded text-xs text-red-700 border border-red-200">
+            Device not communicating. Check factory power & network, or restart bridge below.
+          </div>
+        )}
+        {isStale && (
+          <div className="mt-2 p-2 bg-white/60 rounded text-xs text-yellow-800 border border-yellow-200">
+            Device hasn't polled in {pollAge}s. Brief network hiccup or device sleep.
+          </div>
+        )}
+      </div>
+    </div>
+  )
 }

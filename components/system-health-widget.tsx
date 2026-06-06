@@ -97,9 +97,12 @@ export default function SystemHealthWidget() {
           {bridgeUp && (
             <>
               <div>
-                <div className="opacity-60">Device poll</div>
+                <div className="opacity-60">Device</div>
                 <div className="font-medium">
-                  {deviceAge != null ? formatAge(deviceAge) : '—'}
+                  {deviceAge == null ? '—' :
+                   deviceAge < 60 ? '🟢 Connected' :
+                   deviceAge < 300 ? `🟡 Stale (${formatAge(deviceAge)})` :
+                   `🔴 Offline (${formatAge(deviceAge)})`}
                 </div>
               </div>
               <div>
