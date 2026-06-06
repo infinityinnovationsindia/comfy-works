@@ -5,6 +5,7 @@ import { cookies } from 'next/headers'
 import { redirect } from 'next/navigation'
 import Link from 'next/link'
 import DashboardClock from '@/components/dashboard-clock'
+import SystemHealthWidget from '@/components/system-health-widget'
 import {
   Users, Clock, FileText, Flag, CheckSquare,
   DollarSign, Calendar, AlertTriangle, TrendingUp,
@@ -206,6 +207,9 @@ export default async function DashboardPage() {
             <p className="text-xs font-medium text-[#1D9E75]">{empCount ?? 0} active employees</p>
           </div>
         </div>
+
+        {/* System health — visible to super_admin only (widget self-hides for others) */}
+        <SystemHealthWidget />
 
         {/* Stat grid — numbers are shift-aware (absent only counted after each employee's shift starts) */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
