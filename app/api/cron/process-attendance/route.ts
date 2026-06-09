@@ -7,6 +7,15 @@ import { NextResponse } from 'next/server'
 // (covers people who scan 2-4 times to make sure the machine registered)
 const CLUSTER_WINDOW_SECONDS = 60
 
+// Fallback rules used when an employee has NO category assigned.
+// These match the previous hardcoded behavior — zero regression.
+const DEFAULT_RULES = {
+  late_grace_minutes: 0,
+  early_grace_minutes: 0,
+  half_day_if_hours_below: 5,   // legacy: <5 hrs → AA
+  absent_if_hours_below: 0,     // disabled
+}
+
 function createSupabase() {
   return createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -25,7 +34,6 @@ export async function GET(req: Request) {
 }
 
 // Group punches that occurred within CLUSTER_WINDOW_SECONDS of each other.
-// Returns array of clusters; each cluster is an array of Dates (sorted ascending).
 function clusterPunches(times: Date[]): Date[][] {
   if (times.length === 0) return []
   const sorted = [...times].sort((a, b) => a.getTime() - b.getTime())
@@ -47,7 +55,6 @@ async function handler(dateParam: string | null) {
   try {
     const supabase = createSupabase()
 
-    // Determine target date — defaults to today (IST)
     const istNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }))
     const todayIST = istNow.toISOString().split('T')[0]
     const targetDate = dateParam || todayIST
@@ -57,13 +64,13 @@ async function handler(dateParam: string | null) {
       return NextResponse.json({ error: 'Invalid date format. Use YYYY-MM-DD' }, { status: 400 })
     }
 
-    // IST day boundaries in UTC
     const istStartUTC = new Date(`${targetDate}T00:00:00+05:30`).toISOString()
     const istEndUTC = new Date(`${targetDate}T23:59:59+05:30`).toISOString()
 
+    // Fetch employees + their category_id
     const { data: employees } = await supabase
       .from('employees')
-      .select('id, employee_no, location, shift_id, is_biometric_exempt')
+      .select('id, employee_no, location, shift_id, category_id, is_biometric_exempt')
       .eq('status', 'Active')
 
     if (!employees?.length) {
@@ -82,6 +89,12 @@ async function handler(dateParam: string | null) {
       .select('id, start_time, end_time')
 
     const shiftMap = new Map(shifts?.map(s => [s.id, s]) || [])
+
+    // Fetch ALL categories once, build a lookup map
+    const { data: categories } = await supabase
+      .from('categories')
+      .select('id, late_grace_minutes, early_grace_minutes, half_day_if_hours_below, absent_if_hours_below')
+    const categoryMap = new Map(categories?.map(c => [c.id, c]) || [])
 
     const { data: holidays } = await supabase
       .from('holidays')
@@ -120,6 +133,15 @@ async function handler(dateParam: string | null) {
         const shift = emp.shift_id ? shiftMap.get(emp.shift_id) : null
         const clusters = clusterPunches(empPunches)
 
+        // Resolve category rules with fallback
+        const cat = emp.category_id ? categoryMap.get(emp.category_id) : null
+        const rules = {
+          late_grace_minutes: cat?.late_grace_minutes ?? DEFAULT_RULES.late_grace_minutes,
+          early_grace_minutes: cat?.early_grace_minutes ?? DEFAULT_RULES.early_grace_minutes,
+          half_day_if_hours_below: Number(cat?.half_day_if_hours_below ?? DEFAULT_RULES.half_day_if_hours_below),
+          absent_if_hours_below: Number(cat?.absent_if_hours_below ?? DEFAULT_RULES.absent_if_hours_below),
+        }
+
         const { data: existingRecord } = await supabase
           .from('attendance_daily')
           .select('is_manually_corrected')
@@ -140,7 +162,6 @@ async function handler(dateParam: string | null) {
         let redMarksEvening = 0
 
         if (isHoliday) {
-          // Worked on a holiday → P, otherwise H
           if (clusters.length >= 1) checkIn = clusters[0][0]
           if (clusters.length >= 2) {
             const lastCluster = clusters[clusters.length - 1]
@@ -153,29 +174,29 @@ async function handler(dateParam: string | null) {
         } else if (approvedLeave) {
           status = approvedLeave
         } else if (isExempt) {
-          // Partners / biometric-exempt employees marked Present without needing punches
           status = 'P'
         } else if (clusters.length === 0) {
-          // No punches and no approved leave
           status = 'AAA_PENDING'
         } else if (clusters.length === 1) {
-          // Only one punch event: they checked in but haven't checked out
           checkIn = clusters[0][0]
-          if (isToday) {
-            // Day still in progress — they're at work
-            status = 'IN_PROGRESS'
-          } else {
-            // Past date with no checkout — they forgot to punch out
-            status = 'A'
-          }
+          status = isToday ? 'IN_PROGRESS' : 'A'
         } else {
-          // 2+ distinct punch events: real check-in and check-out
+          // 2+ clusters: real check-in and check-out
           checkIn = clusters[0][0]
           const lastCluster = clusters[clusters.length - 1]
           checkOut = lastCluster[lastCluster.length - 1]
           hoursWorked = (checkOut.getTime() - checkIn.getTime()) / (1000 * 60 * 60)
-          status = hoursWorked < 5 ? 'AA' : 'P'
 
+          // Apply category-based thresholds
+          if (rules.absent_if_hours_below > 0 && hoursWorked < rules.absent_if_hours_below) {
+            status = 'A'
+          } else if (rules.half_day_if_hours_below > 0 && hoursWorked < rules.half_day_if_hours_below) {
+            status = 'AA'
+          } else {
+            status = 'P'
+          }
+
+          // Red marks — only meaningful if Present (not AA / A)
           if (shift && status === 'P') {
             const [shiftStartH, shiftStartM] = shift.start_time.split(':').map(Number)
             const [shiftEndH, shiftEndM] = shift.end_time.split(':').map(Number)
@@ -187,16 +208,20 @@ async function handler(dateParam: string | null) {
               `${targetDate}T${String(shiftEndH).padStart(2, '0')}:${String(shiftEndM).padStart(2, '0')}:00+05:30`
             )
 
-            const minsLate = Math.floor((checkIn.getTime() - shiftStart.getTime()) / 60000)
-            const minsEarly = Math.floor((shiftEnd.getTime() - checkOut.getTime()) / 60000)
+            // Apply category grace: only minutes past grace count toward red marks
+            const rawMinsLate = Math.floor((checkIn.getTime() - shiftStart.getTime()) / 60000)
+            const rawMinsEarly = Math.floor((shiftEnd.getTime() - checkOut.getTime()) / 60000)
 
-            if (minsLate > 0 && minsLate <= 15) redMarksMorning = 1
-            else if (minsLate > 15 && minsLate <= 30) redMarksMorning = 2
-            else if (minsLate > 30) redMarksMorning = 3
+            const effMinsLate = Math.max(0, rawMinsLate - rules.late_grace_minutes)
+            const effMinsEarly = Math.max(0, rawMinsEarly - rules.early_grace_minutes)
 
-            if (minsEarly > 0 && minsEarly <= 15) redMarksEvening = 1
-            else if (minsEarly > 15 && minsEarly <= 30) redMarksEvening = 2
-            else if (minsEarly > 30) redMarksEvening = 3
+            if (effMinsLate > 0 && effMinsLate <= 15) redMarksMorning = 1
+            else if (effMinsLate > 15 && effMinsLate <= 30) redMarksMorning = 2
+            else if (effMinsLate > 30) redMarksMorning = 3
+
+            if (effMinsEarly > 0 && effMinsEarly <= 15) redMarksEvening = 1
+            else if (effMinsEarly > 15 && effMinsEarly <= 30) redMarksEvening = 2
+            else if (effMinsEarly > 30) redMarksEvening = 3
           }
         }
 
