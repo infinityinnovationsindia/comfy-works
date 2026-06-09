@@ -12,17 +12,28 @@
  * Employees without category_id fall back to safe defaults
  * (spec-aligned: 1 min grace, 5 hr half-day cutoff, no absent threshold).
  *
- * NEW (reprocess support):
- *   - options.employeeIds     → process only these employees (default: all active)
- *   - options.preserveManuallyCorrected (default: true)
- *                             → skip employees whose attendance_daily row for the
- *                               date has is_manually_corrected = true
- *   - returns statusBefore + statusAfter counts (for diff display)
+ * BIOMETRIC-EXEMPT EMPLOYEES (partners):
+ *   Employees with is_biometric_exempt = true are NEVER flagged
+ *   absent/half-day/red-marks. They get:
+ *     - 'H' on holidays
+ *     - leave_type on approved leave dates
+ *     - 'P' on every other day
+ *   Reason: partners don't punch the biometric machine.
+ *
+ * PUNCH CLUSTERING:
+ *   Multiple punches within 60 seconds of each other are treated as
+ *   a single logical punch (the device often registers a tap 2-3 times).
+ *   We keep the first punch of each cluster.
+ *
+ * Reprocess support:
+ *   - options.employeeIds     → process only these employees
+ *   - options.preserveManuallyCorrected (default true)
+ *                             → skip rows with is_manually_corrected = true
+ *   - returns statusBefore + statusAfter counts
  */
 import { createClient } from '@supabase/supabase-js';
 import { morningRedMarks, eveningRedMarks } from './red-marks';
 
-// Fallback rules for employees with no category assigned yet
 const DEFAULT_CATEGORY = {
   late_grace_minutes: 1,
   early_grace_minutes: 1,
@@ -31,6 +42,9 @@ const DEFAULT_CATEGORY = {
   half_day_unpaid: true,
   holiday_paid: false,
 };
+
+// Punch clustering window — taps within this many seconds are one event.
+const PUNCH_CLUSTER_SECONDS = 60;
 
 type CategoryRules = {
   late_grace_minutes: number;
@@ -42,9 +56,7 @@ type CategoryRules = {
 };
 
 export type ProcessOptions = {
-  /** Restrict processing to these employee IDs. If omitted, processes all active employees. */
   employeeIds?: string[];
-  /** If true (default), skip rows where attendance_daily.is_manually_corrected = true */
   preserveManuallyCorrected?: boolean;
 };
 
@@ -79,18 +91,36 @@ function parseShiftMinutes(timeStr: string): number {
 }
 
 /**
- * Process attendance for a specific date (IST).
- * Date format: 'YYYY-MM-DD' in IST
+ * Cluster a sorted list of punches: collapse any punches within
+ * PUNCH_CLUSTER_SECONDS of the previous kept punch into one.
  */
+function clusterPunches(
+  punches: Array<{ punched_at: string; punch_type: string }>
+): Array<{ punched_at: string; punch_type: string }> {
+  if (punches.length <= 1) return punches;
+
+  const out: typeof punches = [punches[0]];
+  for (let i = 1; i < punches.length; i++) {
+    const prevMs = new Date(out[out.length - 1].punched_at).getTime();
+    const curMs  = new Date(punches[i].punched_at).getTime();
+    const gapSec = (curMs - prevMs) / 1000;
+    if (gapSec > PUNCH_CLUSTER_SECONDS) {
+      out.push(punches[i]);
+    }
+    // else: same cluster, drop this duplicate
+  }
+  return out;
+}
+
 export async function processDateAttendance(
   dateIST: string,
   options: ProcessOptions = {}
 ): Promise<ProcessResult> {
   const supabase = adminClient();
   const errors: string[] = [];
-  const preserveManuallyCorrected = options.preserveManuallyCorrected !== false; // default true
+  const preserveManuallyCorrected = options.preserveManuallyCorrected !== false;
 
-  // 1. Load employees (filtered if employeeIds passed)
+  // 1. Load employees (filter if employeeIds passed)
   let empQuery = supabase
     .from('employees')
     .select('id, employee_no, employment_type, location, shift_id, category_id, status, date_of_joining, reporting_manager_id, daily_salary_rate, is_biometric_exempt')
@@ -101,7 +131,6 @@ export async function processDateAttendance(
   }
 
   const { data: employees, error: empErr } = await empQuery;
-
   if (empErr || !employees) {
     return {
       processed: 0,
@@ -112,27 +141,25 @@ export async function processDateAttendance(
     };
   }
 
-  // 2. Capture statusBefore — snapshot of current attendance_daily for this scope+date
+  // 2. Capture statusBefore
   const empIds = employees.map(e => e.id);
   const statusBefore = await countStatusForScope(supabase, dateIST, empIds);
 
-  // 3. Load shifts
+  // 3. Reference data
   const { data: shifts } = await supabase.from('shifts').select('*');
   const shiftMap = new Map((shifts ?? []).map(s => [s.id, s]));
 
-  // 4. Load categories
   const { data: categories } = await supabase
     .from('categories')
     .select('id, late_grace_minutes, early_grace_minutes, half_day_if_hours_below, absent_if_hours_below, half_day_unpaid, holiday_paid')
     .eq('is_active', true);
   const categoryMap = new Map((categories ?? []).map(c => [c.id, c]));
 
-  // 5. Load holiday calendars
   const { data: holidays } = await supabase.from('holidays').select('date, calendar_type, name');
-  const factoryHolidays = new Set((holidays ?? []).filter(h => h.calendar_type === 'Factory').map(h => h.date));
+  const factoryHolidays  = new Set((holidays ?? []).filter(h => h.calendar_type === 'Factory').map(h => h.date));
   const showroomHolidays = new Set((holidays ?? []).filter(h => h.calendar_type === 'Showroom').map(h => h.date));
 
-  // 6. Identify manually-corrected rows to skip
+  // 4. Manually-corrected rows
   const manuallyCorrectedIds = new Set<string>();
   if (preserveManuallyCorrected) {
     const { data: corrected } = await supabase
@@ -144,17 +171,20 @@ export async function processDateAttendance(
     (corrected ?? []).forEach(r => manuallyCorrectedIds.add(r.employee_id));
   }
 
-  // 7. Load punches
+  // 5. Punches (only for non-exempt employees — partners don't punch)
+  const nonExemptEmpIds = employees.filter(e => !e.is_biometric_exempt).map(e => e.id);
   const dayStartUTC = new Date(dateIST + 'T00:00:00+05:30').toISOString();
   const dayEndUTC   = new Date(dateIST + 'T23:59:59+05:30').toISOString();
 
-  const { data: allPunches } = await supabase
-    .from('attendance_punches')
-    .select('employee_id, punched_at, punch_type')
-    .gte('punched_at', dayStartUTC)
-    .lte('punched_at', dayEndUTC)
-    .in('employee_id', empIds)
-    .order('punched_at', { ascending: true });
+  const { data: allPunches } = nonExemptEmpIds.length > 0
+    ? await supabase
+        .from('attendance_punches')
+        .select('employee_id, punched_at, punch_type')
+        .gte('punched_at', dayStartUTC)
+        .lte('punched_at', dayEndUTC)
+        .in('employee_id', nonExemptEmpIds)
+        .order('punched_at', { ascending: true })
+    : { data: [] as Array<{ employee_id: string; punched_at: string; punch_type: string }> };
 
   const punchMap = new Map<string, Array<{ punched_at: string; punch_type: string }>>();
   (allPunches ?? []).forEach(p => {
@@ -162,7 +192,7 @@ export async function processDateAttendance(
     punchMap.get(p.employee_id)!.push(p);
   });
 
-  // 8. Load approved leaves
+  // 6. Approved leaves
   const { data: leaveRequests } = await supabase
     .from('leave_requests')
     .select('id, employee_id, leave_type, half_day_type, date_from, date_to, status')
@@ -182,14 +212,10 @@ export async function processDateAttendance(
 
   for (const emp of employees) {
     try {
-      // Skip manually-corrected rows
       if (manuallyCorrectedIds.has(emp.id)) {
         skipped++;
         continue;
       }
-
-      const shift = shiftMap.get(emp.shift_id);
-      if (!shift) continue;
 
       const category: CategoryRules = emp.category_id
         ? (categoryMap.get(emp.category_id) as CategoryRules) ?? DEFAULT_CATEGORY
@@ -199,8 +225,40 @@ export async function processDateAttendance(
         ? showroomHolidays.has(dateIST)
         : factoryHolidays.has(dateIST);
 
-      const punches = punchMap.get(emp.id) ?? [];
       const empLeaves = leaveMap.get(emp.id) ?? [];
+
+      // ── BIOMETRIC-EXEMPT (partners): special-case handling ──
+      if (emp.is_biometric_exempt) {
+        const result = processExemptDay({
+          dateIST,
+          approvedLeaves: empLeaves,
+          isHolidayDate,
+        });
+        const { error: upsertErr } = await supabase
+          .from('attendance_daily')
+          .upsert({
+            employee_id:       emp.id,
+            date:              dateIST,
+            check_in:          null,
+            check_out:         null,
+            hours_worked:      null,
+            status:            result.status,
+            red_marks_morning: 0,
+            red_marks_evening: 0,
+            red_marks_total:   0,
+            leave_id:          result.leaveId ?? null,
+          }, { onConflict: 'employee_id,date', ignoreDuplicates: false });
+        if (upsertErr) errors.push(`${emp.employee_no}: ${upsertErr.message}`);
+        else processed++;
+        continue;
+      }
+
+      // ── Non-exempt: normal flow ──
+      const shift = shiftMap.get(emp.shift_id);
+      if (!shift) continue;
+
+      const rawPunches = punchMap.get(emp.id) ?? [];
+      const punches = clusterPunches(rawPunches);
 
       const result = processEmployeeDay({
         employee: emp,
@@ -227,24 +285,20 @@ export async function processDateAttendance(
           leave_id:          result.leaveId ?? null,
         }, { onConflict: 'employee_id,date', ignoreDuplicates: false });
 
-      if (upsertErr) {
-        errors.push(`${emp.employee_no}: ${upsertErr.message}`);
-      } else {
-        processed++;
-      }
+      if (upsertErr) errors.push(`${emp.employee_no}: ${upsertErr.message}`);
+      else processed++;
     } catch (e: any) {
       errors.push(`${emp.employee_no}: ${e.message}`);
     }
   }
 
-  // 9. End-of-day AAA confirmation (only when processing in real-time, not historical reprocess)
+  // 7. Auto-promote AAA_PENDING → AAA (for historical or end-of-day)
   const nowAfterCutoff = new Date().toISOString() > new Date(dateIST + 'T20:30:00+05:30').toISOString();
   const isHistoricalDate = dateIST < new Date().toISOString().slice(0, 10);
   if (nowAfterCutoff || isHistoricalDate) {
     await flagAAAForDate(dateIST, supabase, empIds);
   }
 
-  // 10. Capture statusAfter
   const statusAfter = await countStatusForScope(supabase, dateIST, empIds);
 
   return { processed, skipped, errors, statusBefore, statusAfter };
@@ -252,7 +306,6 @@ export async function processDateAttendance(
 
 /**
  * Helper — count attendance_daily.status for given employees on a date.
- * Returns { "P": 28, "AAA_PENDING": 14, ... }
  */
 async function countStatusForScope(
   supabase: ReturnType<typeof adminClient>,
@@ -273,6 +326,28 @@ async function countStatusForScope(
   return counts;
 }
 
+/**
+ * Exempt employees (partners) — never tracked by biometric.
+ * Priority: Holiday > Approved Leave > P (present by default)
+ */
+function processExemptDay(params: {
+  dateIST: string;
+  approvedLeaves: any[];
+  isHolidayDate: boolean;
+}): { status: string; leaveId: string | null } {
+  if (params.isHolidayDate) return { status: 'H', leaveId: null };
+
+  const approvedLeave = params.approvedLeaves.find(l =>
+    l.date_from <= params.dateIST && l.date_to >= params.dateIST &&
+    !['LC', 'EG'].includes(l.leave_type)
+  );
+  if (approvedLeave) {
+    return { status: approvedLeave.leave_type, leaveId: approvedLeave.id ?? null };
+  }
+
+  return { status: 'P', leaveId: null };
+}
+
 function processEmployeeDay(params: {
   employee: any;
   shift: any;
@@ -290,14 +365,12 @@ function processEmployeeDay(params: {
   redMarksEvening: number;
   leaveId: string | null;
 } {
-  const { employee, shift, category, dateIST, punches, approvedLeaves, isHolidayDate } = params;
+  const { shift, category, dateIST, punches, approvedLeaves, isHolidayDate } = params;
 
-  // Holiday takes highest priority
   if (isHolidayDate) {
     return { status: 'H', checkIn: null, checkOut: null, hoursWorked: null, redMarksMorning: 0, redMarksEvening: 0, leaveId: null };
   }
 
-  // Check approved leave for this date (full-day types)
   const approvedLeave = approvedLeaves.find(l =>
     l.date_from <= dateIST && l.date_to >= dateIST &&
     !['LC', 'EG'].includes(l.leave_type)
@@ -311,70 +384,46 @@ function processEmployeeDay(params: {
     };
   }
 
-  // Approved LC or EG — suppress red marks for that direction
   const approvedLC = approvedLeaves.find(l => l.leave_type === 'LC' && l.date_from === dateIST);
   const approvedEG = approvedLeaves.find(l => l.leave_type === 'EG' && l.date_from === dateIST);
 
-  // No punches
   if (punches.length === 0) {
     return { status: 'AAA_PENDING', checkIn: null, checkOut: null, hoursWorked: null, redMarksMorning: 0, redMarksEvening: 0, leaveId: null };
   }
 
-  // Single punch → Absent (A)
+  // Single (clustered) punch → A
   if (punches.length === 1) {
-    const singlePunch = punches[0].punched_at;
-    return { status: 'A', checkIn: singlePunch, checkOut: null, hoursWorked: null, redMarksMorning: 0, redMarksEvening: 0, leaveId: null };
+    return { status: 'A', checkIn: punches[0].punched_at, checkOut: null, hoursWorked: null, redMarksMorning: 0, redMarksEvening: 0, leaveId: null };
   }
 
-  // 2+ punches
   const checkIn  = punches[0].punched_at;
   const checkOut = punches[punches.length - 1].punched_at;
   const hoursWorked = (new Date(checkOut).getTime() - new Date(checkIn).getTime()) / (1000 * 60 * 60);
 
-  // Absent threshold (category-driven). 0 = disabled.
   if (category.absent_if_hours_below > 0 && hoursWorked < category.absent_if_hours_below) {
     return { status: 'A', checkIn, checkOut, hoursWorked, redMarksMorning: 0, redMarksEvening: 0, leaveId: null };
   }
 
-  // Half-day threshold (category-driven). 0 = disabled.
   if (category.half_day_if_hours_below > 0 && hoursWorked < category.half_day_if_hours_below) {
     return { status: 'AA', checkIn, checkOut, hoursWorked, redMarksMorning: 0, redMarksEvening: 0, leaveId: null };
   }
 
-  // Calculate red marks with per-category grace
   const shiftStartMin = parseShiftMinutes(shift.start_time);
   const shiftEndMin   = parseShiftMinutes(shift.end_time);
 
   const checkInIST  = toIST(checkIn);
   const checkOutIST = toIST(checkOut);
-  const checkInMin  = minutesSinceMidnight(checkInIST);
-  const checkOutMin = minutesSinceMidnight(checkOutIST);
-
-  const minsLate    = checkInMin - shiftStartMin;
-  const minsEarly   = shiftEndMin - checkOutMin;
+  const minsLate    = minutesSinceMidnight(checkInIST)  - shiftStartMin;
+  const minsEarly   = shiftEndMin - minutesSinceMidnight(checkOutIST);
 
   let redMarksMorning = 0;
   let redMarksEvening = 0;
+  if (minsLate > 0 && !approvedLC)  redMarksMorning = morningRedMarks(minsLate, category.late_grace_minutes);
+  if (minsEarly > 0 && !approvedEG) redMarksEvening = eveningRedMarks(minsEarly, category.early_grace_minutes);
 
-  if (minsLate > 0 && !approvedLC) {
-    redMarksMorning = morningRedMarks(minsLate, category.late_grace_minutes);
-  }
-  if (minsEarly > 0 && !approvedEG) {
-    redMarksEvening = eveningRedMarks(minsEarly, category.early_grace_minutes);
-  }
-
-  return {
-    status: 'P',
-    checkIn,
-    checkOut,
-    hoursWorked,
-    redMarksMorning,
-    redMarksEvening,
-    leaveId: null,
-  };
+  return { status: 'P', checkIn, checkOut, hoursWorked, redMarksMorning, redMarksEvening, leaveId: null };
 }
 
-/** Convert AAA_PENDING → AAA for the given date (scoped by employees if provided) */
 async function flagAAAForDate(dateIST: string, supabase: any, empIds?: string[]) {
   let query = supabase
     .from('attendance_daily')
