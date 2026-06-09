@@ -87,8 +87,9 @@ const NAV_SECTIONS: NavSection[] = [
     id: 'team',
     label: 'MY TEAM',
     items: [
-      { label: 'Approvals', href: '/approvals', icon: CheckSquare, roles: MGMT },
-      { label: 'Employees', href: '/employees', icon: Users,       roles: MGMT },
+      { label: 'Approvals',   href: '/approvals',   icon: CheckSquare, roles: MGMT },
+      { label: 'Employees',   href: '/employees',   icon: Users,       roles: MGMT },
+      { label: 'Bulk Assign', href: '/bulk-assign', icon: Users,       roles: SUPER },
     ],
   },
   // ── Factory Operations ─────────────────────────────────────────────────
