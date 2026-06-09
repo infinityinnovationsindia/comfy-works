@@ -8,7 +8,9 @@ function admin() {
   return createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
 }
 
-export async function upsertShift(_prev: unknown, formData: FormData) {
+// FIX: form action={upsertShift} passes ONE arg (formData), not two.
+// Old signature (_prev, formData) caused formData to be undefined → crash.
+export async function upsertShift(formData: FormData) {
   const sb  = admin();
   const id  = (formData.get('id') as string|null) || null;
   const data = {
