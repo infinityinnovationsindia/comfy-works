@@ -9,7 +9,7 @@ import {
   Timer, Navigation, BarChart3, DollarSign, User,
   Settings, LogOut, Flag, ChevronDown, ChevronRight,
   Menu, X, Armchair, Users, Calendar, Shield, Truck,
-  Wallet, Lock, AlarmClock
+  Wallet, Lock, AlarmClock, Building2, Tag
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -125,9 +125,11 @@ const NAV_SECTIONS: NavSection[] = [
     id: 'admin',
     label: 'ADMIN',
     items: [
-      { label: 'Shifts',   href: '/shifts',   icon: Calendar,  roles: SUPER },
-      { label: 'Holidays', href: '/holidays', icon: BarChart3, roles: SUPER },
-      { label: 'Settings', href: '/settings', icon: Settings,  roles: SUPER },
+      { label: 'Departments', href: '/departments', icon: Building2, roles: SUPER },
+      { label: 'Categories',  href: '/categories',  icon: Tag,       roles: SUPER },
+      { label: 'Shifts',      href: '/shifts',      icon: Calendar,  roles: SUPER },
+      { label: 'Holidays',    href: '/holidays',    icon: BarChart3, roles: SUPER },
+      { label: 'Settings',    href: '/settings',    icon: Settings,  roles: SUPER },
     ],
   },
 ]
