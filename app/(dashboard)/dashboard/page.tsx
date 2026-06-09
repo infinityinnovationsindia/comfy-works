@@ -131,7 +131,7 @@ export default async function DashboardPage() {
       supabase.from('attendance_daily')
         .select(`status, red_marks_total, check_in,
           employee:employees!attendance_daily_employee_id_fkey(
-            first_name, last_name, employee_no, department,
+            first_name, last_name, employee_no, department, is_biometric_exempt,
             shift:shifts(start_time, end_time)
           )`)
         .eq('date', today),
@@ -166,25 +166,33 @@ export default async function DashboardPage() {
     // Current IST time in minutes since midnight
     const istMinutes = istNow.getHours() * 60 + istNow.getMinutes()
 
-    const present = todayAll?.filter(a => ['P'].includes(a.status)).length ?? 0
-    const onLeave = todayAll?.filter(a => ['PL','HPL','UL','HUL'].includes(a.status)).length ?? 0
+    // Exclude biometric-exempt employees (partners) from the daily attendance numbers.
+    // They don't punch, so counting them would distort the floor headcount.
+    const trackable = (todayAll ?? []).filter(a => (a.employee as any)?.is_biometric_exempt !== true)
+
+    // "Present" for the live dashboard = anyone verified at work today.
+    // P            → completed day (checked in + out, met hours)
+    // IN_PROGRESS  → checked in this morning, still on the floor (day not finished)
+    const present = trackable.filter(a => ['P','IN_PROGRESS'].includes(a.status)).length
+    const onLeave = trackable.filter(a => ['PL','HPL','UL','HUL'].includes(a.status)).length
     const totalRM = redMarks?.reduce((s, r) => s + (r.red_marks_total ?? 0), 0) ?? 0
 
-    // Only count as absent if the employee's OWN shift has already started
-    const absentList = (todayAll ?? []).filter(a => {
+    // Only count as absent if the employee's OWN shift has already started.
+    // IN_PROGRESS is never absent — they're physically here.
+    const absentList = trackable.filter(a => {
       if (!['A','AAA','AAA_PENDING'].includes(a.status)) return false
       return istMinutes >= shiftStartMins((a.employee as any))
     })
     const absent = absentList.length
 
     // Only count late if their shift has started
-    const lateList = (todayAll ?? []).filter(a => {
+    const lateList = trackable.filter(a => {
       if ((a.red_marks_total ?? 0) === 0) return false
       return istMinutes >= shiftStartMins((a.employee as any))
     })
     const lateToday = lateList.length
 
-    const onLeaveList = (todayAll ?? []).filter(a => ['PL','HPL','UL','HUL'].includes(a.status))
+    const onLeaveList = trackable.filter(a => ['PL','HPL','UL','HUL'].includes(a.status))
 
     const { data: myEmp } = empId ? await supabase.from('employees').select('first_name').eq('id', empId).single() : { data: null }
 
@@ -363,7 +371,7 @@ export default async function DashboardPage() {
     empId ? supabase.from('attendance_daily').select('status, red_marks_total').eq('employee_id', empId).gte('date', monthStart).lte('date', today) : Promise.resolve({ data: [] }),
     empId ? supabase.from('leave_requests').select('id, leave_type, date_from, date_to, status').eq('employee_id', empId).order('created_at', { ascending: false }).limit(5) : Promise.resolve({ data: [] }),
   ])
-  const daysPresent = myMonthAtt?.filter((a: any) => ['P','PL','HPL'].includes(a.status)).length ?? 0
+  const daysPresent = myMonthAtt?.filter((a: any) => ['P','IN_PROGRESS','PL','HPL'].includes(a.status)).length ?? 0
   const daysAbsent  = myMonthAtt?.filter((a: any) => ['A','AAA'].includes(a.status)).length ?? 0
   const myRedMarks  = myMonthAtt?.reduce((s: number, a: any) => s + (a.red_marks_total ?? 0), 0) ?? 0
   const { data: myEmp } = empId ? await supabase.from('employees').select('first_name, designation, department').eq('id', empId).single() : { data: null }
