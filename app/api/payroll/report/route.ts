@@ -1,12 +1,21 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
-import { redMarkDeductionDays } from '@/lib/red-marks';
+import {
+  calculateRedMarkDeduction,
+  DEFAULT_PAYROLL_POLICY,
+  type PayrollPolicy,
+} from '@/lib/payroll-deduction';
 import * as XLSX from 'xlsx';
 
 /**
- * Payroll deductions now respect per-category policy:
+ * Payroll deductions respect per-category policy:
  *   - category.half_day_unpaid  → if false, AA half-day is NOT deducted (paid)
  *   - category.holiday_paid     → if false, H day is NOT counted as paid working day
+ *
+ * Red mark deductions use the configurable policy from `payroll_settings`:
+ *   - global threshold (default 6)
+ *   - per-employee threshold override (e.g. Kamlesh)
+ *   - 3-band spec formula (configurable rates)
  *
  * Employees with no category fall back to spec defaults:
  *   half_day_unpaid = true (AA is deducted)
@@ -31,10 +40,18 @@ export async function GET(request: NextRequest) {
   const from = month + '-01';
   const to   = new Date(new Date(from).getFullYear(), new Date(from).getMonth() + 1, 0).toISOString().split('T')[0];
 
-  // Load all active employees (now including category_id)
+  // Load payroll policy (single row, id=1). Fall back to defaults if missing.
+  const { data: policyRow } = await supabase
+    .from('payroll_settings')
+    .select('*')
+    .eq('id', 1)
+    .single();
+  const policy: PayrollPolicy = policyRow ?? DEFAULT_PAYROLL_POLICY;
+
+  // Load all active employees (including category + red mark override)
   const { data: employees } = await supabase
     .from('employees')
-    .select('id, employee_no, first_name, last_name, department, shift_id, category_id, daily_salary_rate, employment_type')
+    .select('id, employee_no, first_name, last_name, department, shift_id, category_id, daily_salary_rate, employment_type, red_mark_threshold_override')
     .eq('status', 'Active')
     .order('employee_no');
 
@@ -76,7 +93,7 @@ export async function GET(request: NextRequest) {
 
     // Resolve policy from category — fallback if unassigned
     const cat = emp.category_id ? categoryMap.get(emp.category_id) : null;
-    const policy = {
+    const catPolicy = {
       half_day_unpaid: cat?.half_day_unpaid ?? DEFAULT_POLICY.half_day_unpaid,
       holiday_paid:    cat?.holiday_paid    ?? DEFAULT_POLICY.holiday_paid,
     };
@@ -93,7 +110,14 @@ export async function GET(request: NextRequest) {
     const aaCount     = empAtt.filter(a => a.status === 'AA').length;
 
     const totalRedMarks = empAtt.reduce((sum, a) => sum + (a.red_marks_total ?? 0), 0);
-    const redMarkDedDays = redMarkDeductionDays(totalRedMarks);
+
+    // Apply the new red mark policy (threshold + bands + per-employee override)
+    const redMarkResult = calculateRedMarkDeduction(
+      totalRedMarks,
+      policy,
+      emp.red_mark_threshold_override ?? null
+    );
+    const redMarkDedDays = redMarkResult.deductionDays;
     const redMarkDedRs   = redMarkDedDays * dailyRate;
 
     // AAA always deducted (3 days each) — spec rule, not category-driven
@@ -102,7 +126,7 @@ export async function GET(request: NextRequest) {
     // AA deduction depends on category.half_day_unpaid
     // If unpaid: 2 days per AA per spec § 5.5
     // If paid:   0 (treated as a paid half-day)
-    const aaDedRs        = policy.half_day_unpaid ? (aaCount * 2 * dailyRate) : 0;
+    const aaDedRs        = catPolicy.half_day_unpaid ? (aaCount * 2 * dailyRate) : 0;
 
     // Single-punch A always 1 day deduction — spec rule
     const absentDedRs    = absents  * 1 * dailyRate;
@@ -114,7 +138,7 @@ export async function GET(request: NextRequest) {
     const totalDeductionRs = redMarkDedRs + aaaDedRs + aaDedRs + absentDedRs + ulDedRs + loanDedRs;
 
     // Net working days = present + PL + (holidays only if paid for this category)
-    const paidHolidays = policy.holiday_paid ? holidays : 0;
+    const paidHolidays = catPolicy.holiday_paid ? holidays : 0;
     const netWorkingDays = daysPresent + plUsed + paidHolidays;
 
     rows.push({
@@ -128,14 +152,16 @@ export async function GET(request: NextRequest) {
       'PL Used':             plUsed,
       'UL Days':             ulDays,
       'Holidays':            holidays,
-      'Holiday Paid?':       policy.holiday_paid ? 'Yes' : 'No',
+      'Holiday Paid?':       catPolicy.holiday_paid ? 'Yes' : 'No',
       'Absents (A)':         absents,
       'AAA Count':           aaaCount,
       'AA Count':            aaCount,
-      'AA Unpaid?':          policy.half_day_unpaid ? 'Yes' : 'No',
+      'AA Unpaid?':          catPolicy.half_day_unpaid ? 'Yes' : 'No',
       'Red Marks':           totalRedMarks,
+      'Red Mark Threshold':  redMarkResult.thresholdApplied,
       'Red Mark Ded (Days)': redMarkDedDays,
       'Red Mark Ded (₹)':    redMarkDedRs.toFixed(2),
+      'Red Mark Reason':     redMarkResult.reason,
       'AAA Ded (₹)':         aaaDedRs.toFixed(2),
       'AA Ded (₹)':          aaDedRs.toFixed(2),
       'Absent Ded (₹)':      absentDedRs.toFixed(2),

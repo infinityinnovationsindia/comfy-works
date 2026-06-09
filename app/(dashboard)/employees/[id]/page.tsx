@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { fmtDate } from '@/lib/utils';
 import { setEmployeeStatus } from '../actions';
 import type { Employee } from '@/types/database';
+import RedMarkOverrideCard from '@/components/red-mark-override-card';
 
 function Field({ label, value }: { label: string; value: string|null|undefined }) {
   return (
@@ -43,7 +44,44 @@ export default async function EmployeeViewPage({ params }: { params: { id: strin
     .eq('id', params.id).single();
 
   if (!emp) notFound();
-  const e = emp as Employee & { shifts: { name:string; start_time:string; end_time:string }|null; reporting_manager: { first_name:string; last_name:string }|null };
+  const e = emp as Employee & {
+    shifts: { name:string; start_time:string; end_time:string }|null;
+    reporting_manager: { first_name:string; last_name:string }|null;
+    red_mark_threshold_override?: number | null;
+    red_mark_override_reason?: string | null;
+    red_mark_override_set_at?: string | null;
+    red_mark_override_set_by?: string | null;
+  };
+
+  // Fetch global policy threshold + override-setter name
+  const { data: settings } = await supabase
+    .from('payroll_settings')
+    .select('red_mark_threshold')
+    .eq('id', 1)
+    .single();
+  const globalThreshold = settings?.red_mark_threshold ?? 6;
+
+  let setByName: string | null = null;
+  if (e.red_mark_override_set_by) {
+    const { data: setBy } = await supabase
+      .from('employees')
+      .select('first_name, last_name')
+      .eq('id', e.red_mark_override_set_by)
+      .single();
+    if (setBy) setByName = `${setBy.first_name} ${setBy.last_name}`;
+  }
+
+  // Determine if caller can edit the override (super_admin only)
+  const { data: { user } } = await supabase.auth.getUser();
+  let canEditOverride = false;
+  if (user) {
+    const { data: acc } = await supabase
+      .from('user_accounts')
+      .select('role')
+      .eq('id', user.id)
+      .single();
+    canEditOverride = acc?.role === 'super_admin';
+  }
 
   return (
     <div className="max-w-4xl space-y-4">
@@ -116,6 +154,18 @@ export default async function EmployeeViewPage({ params }: { params: { id: strin
       <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-800">
         🔒 Identity documents (PAN, Aadhaar, Bank Account) are visible only to HR & Accounts. Manage in Edit Profile.
       </div>
+
+      {/* Red Mark Policy override */}
+      <RedMarkOverrideCard
+        employeeId={e.id}
+        employeeName={`${e.first_name} ${e.last_name}`}
+        globalThreshold={globalThreshold}
+        currentOverride={e.red_mark_threshold_override ?? null}
+        currentReason={e.red_mark_override_reason ?? null}
+        setAt={e.red_mark_override_set_at ?? null}
+        setByName={setByName}
+        canEdit={canEditOverride}
+      />
 
       {/* Status actions */}
       {e.status === 'Active' && (

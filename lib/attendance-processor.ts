@@ -25,6 +25,13 @@
  *   a single logical punch (the device often registers a tap 2-3 times).
  *   We keep the first punch of each cluster.
  *
+ * LC / EG APPROVAL (Late Coming / Early Going):
+ *   Per spec Section 5.1, LC and EG approvals cover up to ONE HOUR
+ *   beyond the shift boundary. Approval does NOT blanket-suppress
+ *   red marks — it provides a 60-minute buffer.
+ *   - Shift 8am, LC approved, arrive 8:55am → 0 marks (within buffer)
+ *   - Shift 8am, LC approved, arrive 9:05am → effective lateness 5 min → 1 mark
+ *
  * Reprocess support:
  *   - options.employeeIds     → process only these employees
  *   - options.preserveManuallyCorrected (default true)
@@ -45,6 +52,10 @@ const DEFAULT_CATEGORY = {
 
 // Punch clustering window — taps within this many seconds are one event.
 const PUNCH_CLUSTER_SECONDS = 60;
+
+// LC / EG approval buffer — spec § 5.1 says "within 1 hr"
+const LC_BUFFER_MINUTES = 60;
+const EG_BUFFER_MINUTES = 60;
 
 type CategoryRules = {
   late_grace_minutes: number;
@@ -416,10 +427,23 @@ function processEmployeeDay(params: {
   const minsLate    = minutesSinceMidnight(checkInIST)  - shiftStartMin;
   const minsEarly   = shiftEndMin - minutesSinceMidnight(checkOutIST);
 
+  // LC / EG approval = 60-minute buffer (spec § 5.1)
+  // If approved, subtract the buffer from lateness/earliness BEFORE
+  // applying the category's grace and computing red marks.
+  let effectiveMinsLate = minsLate;
+  if (approvedLC && effectiveMinsLate > 0) {
+    effectiveMinsLate = Math.max(0, effectiveMinsLate - LC_BUFFER_MINUTES);
+  }
+
+  let effectiveMinsEarly = minsEarly;
+  if (approvedEG && effectiveMinsEarly > 0) {
+    effectiveMinsEarly = Math.max(0, effectiveMinsEarly - EG_BUFFER_MINUTES);
+  }
+
   let redMarksMorning = 0;
   let redMarksEvening = 0;
-  if (minsLate > 0 && !approvedLC)  redMarksMorning = morningRedMarks(minsLate, category.late_grace_minutes);
-  if (minsEarly > 0 && !approvedEG) redMarksEvening = eveningRedMarks(minsEarly, category.early_grace_minutes);
+  if (effectiveMinsLate > 0)  redMarksMorning = morningRedMarks(effectiveMinsLate, category.late_grace_minutes);
+  if (effectiveMinsEarly > 0) redMarksEvening = eveningRedMarks(effectiveMinsEarly, category.early_grace_minutes);
 
   return { status: 'P', checkIn, checkOut, hoursWorked, redMarksMorning, redMarksEvening, leaveId: null };
 }
