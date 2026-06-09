@@ -1,121 +1,214 @@
+import { createServerClient } from '@supabase/ssr';
+import { cookies } from 'next/headers';
+import { notFound } from 'next/navigation';
+import Link from 'next/link';
+import { fmtDate } from '@/lib/utils';
 
-'use client';
-import { useState, useEffect } from 'react';
-import { createClient } from '@supabase/supabase-js';
-import { useParams, useRouter } from 'next/navigation';
+function Field({ label, value }: { label: string; value: string | number | null | undefined }) {
+  return (
+    <div>
+      <p className="text-xs text-gray-500 mb-0.5">{label}</p>
+      <p className="text-sm text-gray-900 font-medium">{value ?? '—'}</p>
+    </div>
+  );
+}
 
-export default function LeaveDetailPage() {
-  const { id } = useParams<{ id: string }>();
-  const router  = useRouter();
-  const [leave, setLeave]     = useState<any>(null);
-  const [empId, setEmpId]     = useState('');
-  const [role, setRole]       = useState('');
-  const [comment, setComment] = useState('');
-  const [loading, setLoading] = useState(false);
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="border border-gray-200 rounded-xl p-4 md:p-5 bg-white">
+      <h3 className="text-sm font-semibold text-gray-800 mb-4 pb-2 border-b border-gray-100">{title}</h3>
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-x-6 gap-y-4">{children}</div>
+    </div>
+  );
+}
 
-  const supabase = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!);
+const STATUS_STYLE: Record<string, string> = {
+  Pending:     'bg-yellow-100 text-yellow-700',
+  L1_Approved: 'bg-blue-100 text-blue-700',
+  L2_Approved: 'bg-blue-100 text-blue-700',
+  Approved:    'bg-green-100 text-green-700',
+  Rejected:    'bg-red-100 text-red-700',
+  Cancelled:   'bg-gray-100 text-gray-600',
+};
 
-  useEffect(() => {
-    fetch(`/api/leave/${id}`).then(r => r.json()).then(setLeave);
-    supabase.auth.getUser().then(({ data }) => {
-      if (!data.user) return;
-      supabase.from('user_accounts').select('employee_id,role').eq('id', data.user.id).single()
-        .then(({ data: ua }) => { if (ua) { setEmpId(ua.employee_id); setRole(ua.role); } });
-    });
-  }, [id]);
+const STATUS_LABEL: Record<string, string> = {
+  Pending:     'Pending',
+  L1_Approved: 'L1 Approved',
+  L2_Approved: 'L2 Approved',
+  Approved:    'Approved ✓',
+  Rejected:    'Rejected',
+  Cancelled:   'Cancelled',
+};
 
-  async function act(action: 'approve' | 'reject') {
-    setLoading(true);
-    const res = await fetch(`/api/leave/${id}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action, approverId: empId, comment }),
-    });
-    const data = await res.json();
-    if (data.success) router.push('/leave');
-    else { alert(data.error); setLoading(false); }
-  }
+const TYPE_LABEL: Record<string, string> = {
+  PL:  'Paid Leave',
+  HPL: 'Half Paid Leave',
+  UL:  'Unpaid Leave',
+  HUL: 'Half Unpaid Leave',
+  LC:  'Late Coming',
+  EG:  'Early Going',
+};
 
-  if (!leave) return <div className="p-8 text-center text-gray-500">Loading...</div>;
-
-  const isMyTurn = (
-    (leave.status === 'Pending'      && leave.l1_approver_id === empId) ||
-    (leave.status === 'L1_Approved'  && leave.l2_approver_id === empId) ||
-    (leave.status === 'L2_Approved'  && leave.l3_approver_id === empId)
+export default async function LeaveDetailPage({ params }: { params: { id: string } }) {
+  const cookieStore = cookies();
+  const supabase = createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    { cookies: { get: n => cookieStore.get(n)?.value, set: () => {}, remove: () => {} } }
   );
 
+  const { data: lv } = await supabase
+    .from('leave_requests')
+    .select(`
+      *,
+      employee:employee_id ( id, employee_no, first_name, last_name, department ),
+      l1:l1_approver_id ( id, first_name, last_name ),
+      l2:l2_approver_id ( id, first_name, last_name ),
+      rejecter:rejected_by ( id, first_name, last_name )
+    `)
+    .eq('id', params.id)
+    .single();
+
+  if (!lv) notFound();
+
+  const emp = (lv as any).employee;
+  const l1 = (lv as any).l1;
+  const l2 = (lv as any).l2;
+  const rejecter = (lv as any).rejecter;
+  const typeLabel = TYPE_LABEL[lv.leave_type] || lv.leave_type;
+
   return (
-    <div className="max-w-2xl mx-auto p-6">
-      <button onClick={() => router.back()} className="text-sm text-gray-500 mb-4">← Back</button>
-      <h1 className="text-2xl font-semibold mb-6">Leave Application</h1>
-
-      {/* Flags */}
-      <div className="flex gap-2 mb-4">
-        {leave.notice_violation && (
-          <span className="px-3 py-1 bg-red-100 text-red-800 text-sm font-medium rounded-full">⚠️ NOTICE VIOLATION</span>
-        )}
-        {leave.is_retroactive && (
-          <span className="px-3 py-1 bg-orange-100 text-orange-800 text-sm font-medium rounded-full">📅 RETROACTIVE APPLICATION</span>
-        )}
-      </div>
-
-      <div className="bg-white border rounded-xl divide-y">
-        <div className="p-4 grid grid-cols-2 gap-4 text-sm">
-          <div><span className="text-gray-500">Employee</span><div className="font-medium">{leave.employee?.first_name} {leave.employee?.last_name} ({leave.employee?.employee_no})</div></div>
-          <div><span className="text-gray-500">Department</span><div>{leave.employee?.department}</div></div>
-          <div><span className="text-gray-500">Leave Type</span><div className="font-medium">{leave.leave_type} {leave.half_day_type ? `(${leave.half_day_type})` : ''}</div></div>
-          <div><span className="text-gray-500">Status</span><div className="font-medium">{leave.status}</div></div>
-          <div><span className="text-gray-500">From</span><div>{leave.date_from}</div></div>
-          <div><span className="text-gray-500">To</span><div>{leave.date_to}</div></div>
-          <div><span className="text-gray-500">Working Days</span><div>{leave.working_days_count}</div></div>
-          <div><span className="text-gray-500">PL to Deduct</span><div>{leave.pl_to_deduct}</div></div>
-          <div className="col-span-2"><span className="text-gray-500">Reason</span><div>{leave.reason}</div></div>
-          {leave.out_of_station && (
-            <>
-              <div><span className="text-gray-500">Out of Station Contact</span><div>{leave.out_of_station_contact}</div></div>
-              <div><span className="text-gray-500">Address</span><div>{leave.out_of_station_address}</div></div>
-            </>
-          )}
-        </div>
-
-        {/* Approval chain status */}
-        <div className="p-4">
-          <h3 className="text-sm font-medium text-gray-700 mb-3">Approval Chain ({leave.chain_type})</h3>
-          <div className="space-y-2 text-sm">
-            {[
-              { label: 'L1', approver: leave.l1_approver, at: leave.l1_approved_at, comment: leave.l1_comment },
-              { label: 'L2', approver: leave.l2_approver, at: leave.l2_approved_at, comment: leave.l2_comment },
-              ...(leave.chain_type === '3step' ? [{ label: 'L3 (Kush)', approver: leave.l3_approver, at: leave.l3_approved_at, comment: leave.l3_comment }] : []),
-            ].map(step => (
-              <div key={step.label} className="flex items-center gap-3">
-                <span className={`w-2 h-2 rounded-full ${step.at ? 'bg-green-500' : 'bg-gray-300'}`}></span>
-                <span className="text-gray-600">{step.label}: {step.approver?.first_name} {step.approver?.last_name}</span>
-                {step.at && <span className="text-green-600 text-xs">✓ {new Date(step.at).toLocaleDateString('en-IN')}</span>}
-                {step.comment && <span className="text-gray-500 text-xs italic">"{step.comment}"</span>}
-              </div>
-            ))}
+    <div className="max-w-4xl space-y-4 p-6">
+      {/* Header */}
+      <div className="bg-white rounded-xl border border-gray-200 p-5">
+        <Link href="/leave" className="text-xs text-gray-500 hover:underline">← Leave Management</Link>
+        <div className="flex flex-wrap items-start justify-between gap-4 mt-1">
+          <div>
+            <h1 className="text-xl font-bold text-gray-900">
+              {typeLabel}
+              {lv.half_day_type && <span className="text-base font-normal text-gray-500 ml-2">({lv.half_day_type})</span>}
+            </h1>
+            <p className="text-sm text-gray-500 mt-0.5">
+              {fmtDate(lv.date_from)}
+              {lv.date_from !== lv.date_to && ` → ${fmtDate(lv.date_to)}`}
+              <span className="mx-1.5 text-gray-400">·</span>
+              <span className="font-medium text-gray-700">{lv.working_days_count} day{lv.working_days_count !== 1 ? 's' : ''}</span>
+            </p>
+            {emp && (
+              <p className="text-xs text-gray-500 mt-1">
+                {emp.first_name} {emp.last_name} · {emp.employee_no} · {emp.department || '—'}
+              </p>
+            )}
+          </div>
+          <div className="flex flex-col items-end gap-1.5">
+            <span className={`text-xs px-2.5 py-0.5 rounded-full font-medium ${STATUS_STYLE[lv.status] ?? 'bg-gray-100 text-gray-700'}`}>
+              {STATUS_LABEL[lv.status] || lv.status}
+            </span>
+            {lv.notice_violation && (
+              <span className="text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-medium">Notice Violation</span>
+            )}
+            {lv.is_retroactive && (
+              <span className="text-xs px-2 py-0.5 rounded-full bg-purple-100 text-purple-700 font-medium">Retroactive</span>
+            )}
           </div>
         </div>
+      </div>
 
-        {/* Action buttons — only shown if it's this user's turn */}
-        {isMyTurn && leave.status !== 'Approved' && leave.status !== 'Rejected' && (
-          <div className="p-4">
-            <textarea value={comment} onChange={e => setComment(e.target.value)}
-              placeholder="Optional comment..."
-              className="w-full border rounded-lg p-2.5 text-sm mb-3" rows={2} />
-            <div className="flex gap-3">
-              <button onClick={() => act('approve')} disabled={loading}
-                className="flex-1 py-2.5 bg-green-700 text-white rounded-lg font-medium disabled:opacity-60">
-                ✓ Approve
-              </button>
-              <button onClick={() => act('reject')} disabled={loading}
-                className="flex-1 py-2.5 bg-red-600 text-white rounded-lg font-medium disabled:opacity-60">
-                ✗ Reject
-              </button>
+      <Section title="Leave Details">
+        <Field label="Type" value={typeLabel} />
+        <Field label="Half Day" value={lv.half_day_type} />
+        <Field label="From" value={fmtDate(lv.date_from)} />
+        <Field label="To" value={fmtDate(lv.date_to)} />
+        <Field label="Working Days" value={lv.working_days_count} />
+        <Field label="PL to Deduct" value={lv.pl_to_deduct} />
+        <Field label="Applied On" value={fmtDate(lv.created_at)} />
+        <Field label="Last Updated" value={lv.updated_at ? new Date(lv.updated_at).toLocaleString('en-IN') : null} />
+      </Section>
+
+      <div className="border border-gray-200 rounded-xl p-4 md:p-5 bg-white">
+        <h3 className="text-sm font-semibold text-gray-800 mb-3 pb-2 border-b border-gray-100">Reason</h3>
+        <p className="text-sm text-gray-700 whitespace-pre-wrap">{lv.reason || '—'}</p>
+      </div>
+
+      {lv.out_of_station && (
+        <Section title="Out of Station">
+          <Field label="Contact Number" value={lv.out_of_station_contact} />
+          <Field label="Address" value={lv.out_of_station_address} />
+        </Section>
+      )}
+
+      {/* Approval Timeline */}
+      <div className="border border-gray-200 rounded-xl p-4 md:p-5 bg-white">
+        <h3 className="text-sm font-semibold text-gray-800 mb-4 pb-2 border-b border-gray-100">Approval Timeline</h3>
+        <div className="space-y-4">
+          {/* L1 */}
+          <div className="flex gap-3">
+            <div className={`mt-0.5 w-2 h-2 rounded-full flex-shrink-0 ${lv.l1_approved_at ? 'bg-green-500' : lv.status === 'Rejected' ? 'bg-red-500' : 'bg-gray-300'}`} />
+            <div className="flex-1">
+              <p className="text-sm font-medium text-gray-900">
+                Level 1 — {l1 ? `${l1.first_name} ${l1.last_name}` : 'Direct Supervisor'}
+              </p>
+              {lv.l1_approved_at ? (
+                <p className="text-xs text-green-700 mt-0.5">
+                  Approved · {new Date(lv.l1_approved_at).toLocaleString('en-IN')}
+                </p>
+              ) : (
+                <p className="text-xs text-gray-500 mt-0.5">Pending</p>
+              )}
+              {lv.l1_comment && <p className="text-xs text-gray-600 mt-1 italic">"{lv.l1_comment}"</p>}
             </div>
           </div>
-        )}
+
+          {/* L2 */}
+          <div className="flex gap-3">
+            <div className={`mt-0.5 w-2 h-2 rounded-full flex-shrink-0 ${lv.l2_approved_at ? 'bg-green-500' : lv.status === 'Rejected' ? 'bg-red-500' : 'bg-gray-300'}`} />
+            <div className="flex-1">
+              <p className="text-sm font-medium text-gray-900">
+                Level 2 — {l2 ? `${l2.first_name} ${l2.last_name}` : 'Kush Patel'} (Final)
+              </p>
+              {lv.l2_approved_at ? (
+                <p className="text-xs text-green-700 mt-0.5">
+                  Approved · {new Date(lv.l2_approved_at).toLocaleString('en-IN')}
+                </p>
+              ) : (
+                <p className="text-xs text-gray-500 mt-0.5">Pending L1</p>
+              )}
+              {lv.l2_comment && <p className="text-xs text-gray-600 mt-1 italic">"{lv.l2_comment}"</p>}
+            </div>
+          </div>
+
+          {/* Rejection */}
+          {lv.status === 'Rejected' && (
+            <div className="flex gap-3 pt-3 border-t border-red-100">
+              <div className="mt-0.5 w-2 h-2 rounded-full flex-shrink-0 bg-red-500" />
+              <div className="flex-1">
+                <p className="text-sm font-medium text-red-700">
+                  Rejected by {rejecter ? `${rejecter.first_name} ${rejecter.last_name}` : 'unknown'}
+                </p>
+                {lv.rejected_at && (
+                  <p className="text-xs text-red-600 mt-0.5">
+                    {new Date(lv.rejected_at).toLocaleString('en-IN')}
+                  </p>
+                )}
+                {lv.rejection_reason && (
+                  <p className="text-xs text-red-700 mt-1 bg-red-50 px-2 py-1 rounded">
+                    {lv.rejection_reason}
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
+
+      {(lv.status === 'Pending' || lv.status === 'L1_Approved') && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex items-center justify-between">
+          <p className="text-sm text-amber-800">This request is awaiting approval.</p>
+          <Link href="/approvals" className="text-sm font-medium text-amber-900 underline">
+            Go to Approvals →
+          </Link>
+        </div>
+      )}
     </div>
   );
 }

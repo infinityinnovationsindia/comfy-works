@@ -80,7 +80,11 @@ export default function OnDutyPage() {
       {!loading && !error && requests.length > 0 && (
         <div className="space-y-3">
           {requests.map(r => (
-            <div key={r.id} className="bg-white border border-gray-200 rounded-xl p-4">
+            <Link
+              key={r.id}
+              href={`/on-duty/${r.id}`}
+              className="block bg-white border border-gray-200 rounded-xl p-4 hover:border-[#1D9E75] hover:shadow-sm transition-all"
+            >
               <div className="flex items-start justify-between gap-3">
                 <div className="flex-1">
                   <div className="flex items-center gap-2 flex-wrap mb-1">
@@ -96,7 +100,7 @@ export default function OnDutyPage() {
                 </div>
                 <p className="text-xs text-gray-400 flex-shrink-0">{fmt(r.created_at)}</p>
               </div>
-            </div>
+            </Link>
           ))}
         </div>
       )}

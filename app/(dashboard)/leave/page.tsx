@@ -171,7 +171,11 @@ export default function LeavePage() {
       {!loading && !error && items.length > 0 && (
         <div className="space-y-3">
           {items.map(leave => (
-            <div key={leave.id} className="bg-white border border-gray-200 rounded-xl p-4">
+            <Link
+              key={leave.id}
+              href={`/leave/${leave.id}`}
+              className="block bg-white border border-gray-200 rounded-xl p-4 hover:border-[#1D9E75] hover:shadow-sm transition-all"
+            >
               <div className="flex items-start gap-3">
                 {/* Avatar (for pending tab) */}
                 {tab === 'pending' && leave.employee && (
@@ -232,18 +236,15 @@ export default function LeavePage() {
                   <p className="text-xs text-gray-400">
                     {new Date(leave.created_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}
                   </p>
-                  {/* Quick approve/reject for pending tab */}
+                  {/* Quick "Review" hint for pending tab — no longer a separate link since whole card is clickable */}
                   {tab === 'pending' && (
-                    <Link
-                      href="/approvals"
-                      className="text-xs text-[#1D9E75] hover:underline mt-1 block"
-                    >
-                      Review →
-                    </Link>
+                    <p className="text-xs text-[#1D9E75] mt-1">
+                      View →
+                    </p>
                   )}
                 </div>
               </div>
-            </div>
+            </Link>
           ))}
         </div>
       )}
