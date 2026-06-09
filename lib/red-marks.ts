@@ -1,22 +1,29 @@
-
 /**
- * Red Mark calculations — exact Section 6 formula.
- * Never simplify these bands.
+ * Red Mark calculations — exact Section 6 formula with per-category grace.
+ *
+ * Grace minutes are subtracted from raw lateness/earliness BEFORE
+ * applying the 15/30/30+ bands. So a Manager with 10-min grace who
+ * arrives 12 min late = effectively 2 min late = 1 red mark.
+ *
+ * Bands themselves stay universal per spec § 6. Only the grace lever
+ * is per-category (Option A).
  */
 
 /** Morning: minutes late after shift start → red marks */
-export function morningRedMarks(minutesLate: number): number {
-  if (minutesLate <= 0) return 0;
-  if (minutesLate <= 15) return 1;
-  if (minutesLate <= 30) return 2;
+export function morningRedMarks(minutesLate: number, graceMinutes: number = 0): number {
+  const effectiveLate = minutesLate - graceMinutes;
+  if (effectiveLate <= 0) return 0;
+  if (effectiveLate <= 15) return 1;
+  if (effectiveLate <= 30) return 2;
   return 3;
 }
 
 /** Evening: minutes early before shift end → red marks */
-export function eveningRedMarks(minutesEarly: number): number {
-  if (minutesEarly <= 0) return 0;
-  if (minutesEarly <= 15) return 1;
-  if (minutesEarly <= 30) return 2;
+export function eveningRedMarks(minutesEarly: number, graceMinutes: number = 0): number {
+  const effectiveEarly = minutesEarly - graceMinutes;
+  if (effectiveEarly <= 0) return 0;
+  if (effectiveEarly <= 15) return 1;
+  if (effectiveEarly <= 30) return 2;
   return 3;
 }
 
