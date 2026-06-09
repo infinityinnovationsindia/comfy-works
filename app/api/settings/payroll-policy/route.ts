@@ -1,9 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerClient } from '@supabase/ssr';
+import { createClient } from '@supabase/supabase-js';
 import { cookies } from 'next/headers';
 import { DEFAULT_PAYROLL_POLICY, type PayrollPolicy } from '@/lib/payroll-deduction';
 
-function makeClient() {
+/**
+ * Auth client — uses the user's cookie, subject to RLS.
+ * Used ONLY to validate who is calling (auth.getUser + role lookup).
+ */
+function makeAuthClient() {
   const cookieStore = cookies();
   return createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -12,7 +17,20 @@ function makeClient() {
   );
 }
 
-async function getCallerRole(supabase: ReturnType<typeof makeClient>) {
+/**
+ * Admin client — uses service role, bypasses RLS.
+ * Used for actual read/write of payroll_settings + history.
+ * Safe because we validate the caller's role manually before using it.
+ */
+function makeAdminClient() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!,
+    { auth: { autoRefreshToken: false, persistSession: false } }
+  );
+}
+
+async function getCallerRole(supabase: ReturnType<typeof makeAuthClient>) {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return null;
   const { data: acc } = await supabase
@@ -24,8 +42,8 @@ async function getCallerRole(supabase: ReturnType<typeof makeClient>) {
 }
 
 export async function GET() {
-  const supabase = makeClient();
-  const { data, error } = await supabase
+  const admin = makeAdminClient();
+  const { data, error } = await admin
     .from('payroll_settings')
     .select('*')
     .eq('id', 1)
@@ -38,16 +56,21 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
-  const supabase = makeClient();
+  const authClient = makeAuthClient();
+  const admin = makeAdminClient();
 
-  const acc = await getCallerRole(supabase);
+  // Validate the caller is super_admin (using their session)
+  const acc = await getCallerRole(authClient);
   if (!acc || acc.role !== 'super_admin') {
-    return NextResponse.json({ error: 'Only Super Admin can change payroll policy' }, { status: 403 });
+    return NextResponse.json(
+      { error: 'Only Super Admin can change payroll policy' },
+      { status: 403 }
+    );
   }
 
   const body = await request.json();
 
-  // Validate every field
+  // Validate payload
   const required: (keyof PayrollPolicy)[] = [
     'red_mark_threshold',
     'band1_rate_days', 'band1_per_marks', 'band1_max_marks',
@@ -62,19 +85,22 @@ export async function POST(request: NextRequest) {
   }
 
   if (body.band1_max_marks >= body.band2_max_marks) {
-    return NextResponse.json({ error: 'Band 2 max marks must be greater than Band 1 max marks' }, { status: 400 });
+    return NextResponse.json(
+      { error: 'Band 2 max marks must be greater than Band 1 max marks' },
+      { status: 400 }
+    );
   }
 
-  // Read current settings to push to history before overwrite
-  const { data: oldData } = await supabase
+  // Read old settings (via admin — bypasses RLS)
+  const { data: oldData } = await admin
     .from('payroll_settings')
     .select('*')
     .eq('id', 1)
     .single();
 
-  // Insert into history (if old data existed)
+  // Push old values to history (via admin)
   if (oldData) {
-    await supabase.from('payroll_settings_history').insert({
+    await admin.from('payroll_settings_history').insert({
       red_mark_threshold: oldData.red_mark_threshold,
       band1_rate_days: oldData.band1_rate_days,
       band1_per_marks: oldData.band1_per_marks,
@@ -89,8 +115,8 @@ export async function POST(request: NextRequest) {
     });
   }
 
-  // Save new settings
-  const { error } = await supabase
+  // Upsert new settings (via admin — bypasses RLS)
+  const { error } = await admin
     .from('payroll_settings')
     .upsert({
       id: 1,
