@@ -48,6 +48,7 @@ const DEFAULT_CATEGORY = {
   absent_if_hours_below: 0,
   half_day_unpaid: true,
   holiday_paid: false,
+  weekly_off_paid: true,
 };
 
 // Punch clustering window — taps within this many seconds are one event.
@@ -64,6 +65,7 @@ type CategoryRules = {
   absent_if_hours_below: number;
   half_day_unpaid: boolean;
   holiday_paid: boolean;
+  weekly_off_paid: boolean;
 };
 
 export type ProcessOptions = {
@@ -170,13 +172,20 @@ export async function processDateAttendance(
 
   const { data: categories } = await supabase
     .from('categories')
-    .select('id, late_grace_minutes, early_grace_minutes, half_day_if_hours_below, absent_if_hours_below, half_day_unpaid, holiday_paid')
+    .select('id, late_grace_minutes, early_grace_minutes, half_day_if_hours_below, absent_if_hours_below, half_day_unpaid, holiday_paid, weekly_off_paid')
     .eq('is_active', true);
   const categoryMap = new Map((categories ?? []).map(c => [c.id, c]));
 
-  const { data: holidays } = await supabase.from('holidays').select('date, calendar_type, name');
-  const factoryHolidays  = new Set((holidays ?? []).filter(h => h.calendar_type === 'Factory').map(h => h.date));
-  const showroomHolidays = new Set((holidays ?? []).filter(h => h.calendar_type === 'Showroom').map(h => h.date));
+  // Holidays: read `type` so the engine can distinguish weekly-off (Sunday)
+  // from real holidays (Festival/AMAS/National). The maps now key by date → type
+  // so processEmployeeDay can branch on day-kind, not just yes/no.
+  const { data: holidays } = await supabase.from('holidays').select('date, calendar_type, name, type');
+  const factoryHolidays  = new Map(
+    (holidays ?? []).filter(h => h.calendar_type === 'Factory').map(h => [h.date, h.type as string])
+  );
+  const showroomHolidays = new Map(
+    (holidays ?? []).filter(h => h.calendar_type === 'Showroom').map(h => [h.date, h.type as string])
+  );
 
   // 4. Manually-corrected rows
   const manuallyCorrectedIds = new Set<string>();
@@ -240,9 +249,12 @@ export async function processDateAttendance(
         ? (categoryMap.get(emp.category_id) as CategoryRules) ?? DEFAULT_CATEGORY
         : DEFAULT_CATEGORY;
 
-      const isHolidayDate = emp.location === 'Showroom'
-        ? showroomHolidays.has(dateIST)
-        : factoryHolidays.has(dateIST);
+      // holidayType is undefined on a normal working day,
+      // 'Sunday' on a weekly-off, or 'Festival'/'AMAS'/'National' on a real holiday.
+      const holidayType: string | undefined = emp.location === 'Showroom'
+        ? showroomHolidays.get(dateIST)
+        : factoryHolidays.get(dateIST);
+      const isHolidayDate = holidayType !== undefined;
 
       const empLeaves = leaveMap.get(emp.id) ?? [];
 
@@ -288,6 +300,7 @@ export async function processDateAttendance(
         punches,
         approvedLeaves: empLeaves,
         isHolidayDate,
+        holidayType,
       });
 
       const { error: upsertErr } = await supabase
@@ -377,6 +390,7 @@ function processEmployeeDay(params: {
   punches: Array<{ punched_at: string; punch_type: string }>;
   approvedLeaves: any[];
   isHolidayDate: boolean;
+  holidayType: string | undefined;
 }): {
   status: string;
   checkIn: string | null;
@@ -386,10 +400,31 @@ function processEmployeeDay(params: {
   redMarksEvening: number;
   leaveId: string | null;
 } {
-  const { shift, category, dateIST, isToday, punches, approvedLeaves, isHolidayDate } = params;
+  const { shift, category, dateIST, isToday, punches, approvedLeaves, isHolidayDate, holidayType } = params;
 
+  // ── HOLIDAY / WEEKLY-OFF branch ────────────────────────────────────
+  // `holidayType` came from the holidays table:
+  //   'Sunday'                          → weekly off (paid only if category.weekly_off_paid)
+  //   'Festival' / 'AMAS' / 'National'  → real holiday (paid only if category.holiday_paid)
+  //
+  // Worked-on-day-off (Option 2): need 2+ clustered punches (real check-in AND check-out).
+  // A single stray punch is ignored — status stays WO / H.
+  // Worked days get checkIn/checkOut/hours stored; payroll layer (not here)
+  // turns the (status × category-paid-switch) lookup into +1 or +2 days.
+  // No red marks on worked-off-days — coming in on a rest day isn't penalised.
   if (isHolidayDate) {
-    return { status: 'H', checkIn: null, checkOut: null, hoursWorked: null, redMarksMorning: 0, redMarksEvening: 0, leaveId: null };
+    const isWeeklyOff = holidayType === 'Sunday';
+    const restStatus = isWeeklyOff ? 'WO' : 'H';
+    const workedStatus = isWeeklyOff ? 'WOW' : 'HW';
+
+    if (punches.length >= 2) {
+      const checkIn  = punches[0].punched_at;
+      const checkOut = punches[punches.length - 1].punched_at;
+      const hoursWorked = (new Date(checkOut).getTime() - new Date(checkIn).getTime()) / (1000 * 60 * 60);
+      return { status: workedStatus, checkIn, checkOut, hoursWorked, redMarksMorning: 0, redMarksEvening: 0, leaveId: null };
+    }
+    // 0 or 1 punches on a day off → just the rest status, no work recorded
+    return { status: restStatus, checkIn: null, checkOut: null, hoursWorked: null, redMarksMorning: 0, redMarksEvening: 0, leaveId: null };
   }
 
   const approvedLeave = approvedLeaves.find(l =>
