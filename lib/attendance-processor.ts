@@ -131,6 +131,14 @@ export async function processDateAttendance(
   const errors: string[] = [];
   const preserveManuallyCorrected = options.preserveManuallyCorrected !== false;
 
+  // Determine if the target date is "today" in IST.
+  // Mid-day reprocessing of today must mark single-punch employees as
+  // IN_PROGRESS (still on the floor, day not finished), NOT A.
+  // This matches app/api/cron/process-attendance/route.ts exactly.
+  const todayIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }))
+    .toISOString().split('T')[0];
+  const isToday = dateIST === todayIST;
+
   // 1. Load employees (filter if employeeIds passed)
   let empQuery = supabase
     .from('employees')
@@ -276,6 +284,7 @@ export async function processDateAttendance(
         shift,
         category,
         dateIST,
+        isToday,
         punches,
         approvedLeaves: empLeaves,
         isHolidayDate,
@@ -364,6 +373,7 @@ function processEmployeeDay(params: {
   shift: any;
   category: CategoryRules;
   dateIST: string;
+  isToday: boolean;
   punches: Array<{ punched_at: string; punch_type: string }>;
   approvedLeaves: any[];
   isHolidayDate: boolean;
@@ -376,7 +386,7 @@ function processEmployeeDay(params: {
   redMarksEvening: number;
   leaveId: string | null;
 } {
-  const { shift, category, dateIST, punches, approvedLeaves, isHolidayDate } = params;
+  const { shift, category, dateIST, isToday, punches, approvedLeaves, isHolidayDate } = params;
 
   if (isHolidayDate) {
     return { status: 'H', checkIn: null, checkOut: null, hoursWorked: null, redMarksMorning: 0, redMarksEvening: 0, leaveId: null };
@@ -402,9 +412,11 @@ function processEmployeeDay(params: {
     return { status: 'AAA_PENDING', checkIn: null, checkOut: null, hoursWorked: null, redMarksMorning: 0, redMarksEvening: 0, leaveId: null };
   }
 
-  // Single (clustered) punch → A
+  // Single (clustered) punch:
+  //   today → IN_PROGRESS (still on the floor, day not finished)
+  //   past  → A (forgot to check out)
   if (punches.length === 1) {
-    return { status: 'A', checkIn: punches[0].punched_at, checkOut: null, hoursWorked: null, redMarksMorning: 0, redMarksEvening: 0, leaveId: null };
+    return { status: isToday ? 'IN_PROGRESS' : 'A', checkIn: punches[0].punched_at, checkOut: null, hoursWorked: null, redMarksMorning: 0, redMarksEvening: 0, leaveId: null };
   }
 
   const checkIn  = punches[0].punched_at;
